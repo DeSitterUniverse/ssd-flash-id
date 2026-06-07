@@ -221,6 +221,8 @@ options:
 ### Windows
 
 - Uses `IOCTL_STORAGE_PROTOCOL_COMMAND` for NVMe vendor commands.
+- If a physical-drive request fails with error 87, retries it through the
+  drive's SCSI-port adapter handle.
 - Uses `IOCTL_ATA_PASS_THROUGH` for SATA commands.
 - Requires Administrator privileges.
 - StorNVMe accepts a vendor-specific opcode only when the drive advertises it
@@ -252,6 +254,8 @@ The Windows implementation follows these Microsoft sources:
 - [STORAGE_PROPERTY_ID](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ne-winioctl-storage_property_id)
 - [STORAGE_DEVICE_DESCRIPTOR](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_device_descriptor)
 - [STORAGE_BUS_TYPE](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ne-winioctl-storage_bus_type)
+- [IOCTL_SCSI_GET_ADDRESS](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ni-ntddscsi-ioctl_scsi_get_address)
+- [SCSI_ADDRESS](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ns-ntddscsi-_scsi_address)
 
 ### ATA pass-through
 
