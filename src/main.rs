@@ -6,6 +6,26 @@ mod nvme;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::FileTypeExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::ptr::{null, null_mut};
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+#[cfg(windows)]
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    QueryDosDeviceW,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::IO::DeviceIoControl;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::ata::{AtaDevice, parse_ata_identify};
 use crate::controllers::FlashIdResult;
@@ -106,6 +126,13 @@ fn check_root() {
         eprintln!("try: sudo ssd-flash-id [device]");
         std::process::exit(1);
     }
+
+    #[cfg(windows)]
+    if !is_process_elevated() {
+        eprintln!("error: administrator privileges required\n");
+        eprintln!("open an elevated terminal and run ssd-flash-id again");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -143,7 +170,10 @@ fn find_nvme_devices() -> Vec<String> {
 
 #[cfg(windows)]
 fn find_nvme_devices() -> Vec<String> {
-    Vec::new()
+    enumerate_physical_drives()
+        .into_iter()
+        .filter(|path| storage_bus_type(path) == Some(BUS_TYPE_NVME))
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -177,7 +207,15 @@ fn find_sata_devices() -> Vec<String> {
 
 #[cfg(windows)]
 fn find_sata_devices() -> Vec<String> {
-    Vec::new()
+    enumerate_physical_drives()
+        .into_iter()
+        .filter(|path| {
+            matches!(
+                storage_bus_type(path),
+                Some(BUS_TYPE_ATA) | Some(BUS_TYPE_USB) | Some(BUS_TYPE_SATA)
+            )
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -202,7 +240,118 @@ fn is_sata_path(path: &str) -> bool {
 
 #[cfg(windows)]
 fn is_sata_path(path: &str) -> bool {
-    path.to_ascii_lowercase().contains("sata")
+    storage_bus_type(path) != Some(BUS_TYPE_NVME)
+}
+
+#[cfg(windows)]
+const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
+#[cfg(windows)]
+const BUS_TYPE_ATA: u32 = 3;
+#[cfg(windows)]
+const BUS_TYPE_USB: u32 = 7;
+#[cfg(windows)]
+const BUS_TYPE_SATA: u32 = 11;
+#[cfg(windows)]
+const BUS_TYPE_NVME: u32 = 17;
+
+#[cfg(windows)]
+fn is_process_elevated() -> bool {
+    let mut token: HANDLE = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0u32;
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    };
+    unsafe {
+        CloseHandle(token);
+    }
+    ok != 0 && elevation.TokenIsElevated != 0
+}
+
+#[cfg(windows)]
+fn enumerate_physical_drives() -> Vec<String> {
+    let mut buffer = vec![0u16; 65_536];
+    let length = unsafe { QueryDosDeviceW(null(), buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 {
+        return Vec::new();
+    }
+
+    let names = buffer[..length as usize]
+        .split(|value| *value == 0)
+        .take_while(|name| !name.is_empty())
+        .filter_map(|name| String::from_utf16(name).ok())
+        .collect::<Vec<_>>();
+    physical_drive_paths(names.iter().map(String::as_str))
+}
+
+#[cfg(windows)]
+fn physical_drive_paths<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut drives = names
+        .into_iter()
+        .filter_map(|name| {
+            name.strip_prefix("PhysicalDrive")
+                .and_then(|suffix| suffix.parse::<u32>().ok())
+                .map(|number| (number, format!(r"\\.\PhysicalDrive{}", number)))
+        })
+        .collect::<Vec<_>>();
+    drives.sort_unstable_by_key(|(number, _)| *number);
+    drives.into_iter().map(|(_, path)| path).collect()
+}
+
+#[cfg(windows)]
+fn storage_bus_type(path: &str) -> Option<u32> {
+    let wide_path: Vec<u16> = std::path::Path::new(path)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    let query = [0u8; 12];
+    let mut descriptor = [0u8; 64];
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            query.as_ptr().cast(),
+            query.len() as u32,
+            descriptor.as_mut_ptr().cast(),
+            descriptor.len() as u32,
+            &mut returned,
+            null_mut(),
+        )
+    };
+    unsafe {
+        CloseHandle(handle);
+    }
+    if ok == 0 || returned < 32 {
+        return None;
+    }
+    Some(u32::from_le_bytes(descriptor[28..32].try_into().ok()?))
 }
 fn list_devices() {
     let nvme_devices = find_nvme_devices();
@@ -540,5 +689,30 @@ fn main() {
         run_sata(&dev_path, &args);
     } else {
         run_nvme(&dev_path, &args);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_and_sorts_physical_drive_names() {
+        let names = [
+            "C:",
+            "PhysicalDrive10",
+            "PhysicalDrive2",
+            "HarddiskVolume1",
+            "PhysicalDrive0",
+        ];
+
+        assert_eq!(
+            physical_drive_paths(names.into_iter()),
+            vec![
+                r"\\.\PhysicalDrive0",
+                r"\\.\PhysicalDrive2",
+                r"\\.\PhysicalDrive10",
+            ]
+        );
     }
 }
