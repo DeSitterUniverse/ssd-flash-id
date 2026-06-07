@@ -12,6 +12,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
+use crate::windows::format_windows_error;
+
 const IOCTL_ATA_PASS_THROUGH: u32 = 0x0004_D02C;
 const ATA_FLAGS_DATA_IN: u16 = 1 << 1;
 const ATA_FLAGS_DATA_OUT: u16 = 1 << 2;
@@ -159,9 +161,9 @@ impl AtaDevice {
         };
         if handle == INVALID_HANDLE_VALUE {
             return Err(format!(
-                "failed to open '{}': Windows error {}",
+                "failed to open '{}': {}",
                 path,
-                unsafe { GetLastError() }
+                format_windows_error(unsafe { GetLastError() })
             ));
         }
         Ok(Self {
@@ -389,8 +391,8 @@ impl AtaDevice {
         };
         if ok == 0 {
             return Err(format!(
-                "ATA pass-through failed: Windows error {} (command 0x{:02x})",
-                unsafe { GetLastError() },
+                "ATA pass-through failed: {} (command 0x{:02x})",
+                format_windows_error(unsafe { GetLastError() }),
                 command
             ));
         }

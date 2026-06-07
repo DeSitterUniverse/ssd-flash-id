@@ -12,6 +12,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
+use crate::windows::format_windows_error;
+
 const IOCTL_STORAGE_PROTOCOL_COMMAND: u32 = 0x002D_0C00;
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
 const STORAGE_PROTOCOL_STRUCTURE_VERSION: u32 = 1;
@@ -189,9 +191,9 @@ impl NvmeDevice {
         };
         if handle == INVALID_HANDLE_VALUE {
             return Err(format!(
-                "failed to open '{}': Windows error {}",
+                "failed to open '{}': {}",
                 path,
-                unsafe { GetLastError() }
+                format_windows_error(unsafe { GetLastError() })
             ));
         }
         Ok(Self {
@@ -290,8 +292,8 @@ impl NvmeDevice {
         };
         if ok == 0 {
             return Err(format!(
-                "NVMe identify query failed: Windows error {}",
-                unsafe { GetLastError() }
+                "NVMe identify query failed: {}",
+                format_windows_error(unsafe { GetLastError() })
             ));
         }
 
@@ -324,8 +326,8 @@ impl NvmeDevice {
         };
         if ok == 0 {
             return Err(format!(
-                "NVMe pass-through failed: Windows error {} (opcode 0x{:02x})",
-                unsafe { GetLastError() },
+                "NVMe pass-through failed: {} (opcode 0x{:02x})",
+                format_windows_error(unsafe { GetLastError() }),
                 opcode
             ));
         }

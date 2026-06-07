@@ -3,6 +3,8 @@ mod controllers;
 mod detect;
 mod nand_db;
 mod nvme;
+#[cfg(windows)]
+mod windows;
 
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::FileTypeExt;
