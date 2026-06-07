@@ -165,6 +165,89 @@ fn build_identify_query() -> AlignedBuffer {
     packet
 }
 
+fn validate_protocol_response(
+    packet: &AlignedBuffer,
+    returned: u32,
+    opcode: u8,
+) -> Result<u32, String> {
+    if returned as usize > packet.len || (returned as usize) < PROTOCOL_HEADER_LEN {
+        return Err(format!(
+            "NVMe pass-through returned an invalid byte count {} (opcode 0x{:02x})",
+            returned, opcode
+        ));
+    }
+
+    let header = packet.header();
+    if header.return_status != STORAGE_PROTOCOL_STATUS_SUCCESS {
+        return Err(format!(
+            "NVMe command rejected: return status 0x{:x}, NVMe status 0x{:x} (opcode 0x{:02x})",
+            header.return_status, header.error_code, opcode
+        ));
+    }
+
+    let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+    let expected_data_len = packet.len.saturating_sub(data_offset);
+    if header.data_from_device_transfer_length != 0 {
+        if header.data_from_device_transfer_length as usize != expected_data_len {
+            return Err(format!(
+                "NVMe command returned {} of {} requested bytes (opcode 0x{:02x})",
+                header.data_from_device_transfer_length, expected_data_len, opcode
+            ));
+        }
+        if (returned as usize) < data_offset + expected_data_len {
+            return Err(format!(
+                "NVMe pass-through response ended before its data buffer (opcode 0x{:02x})",
+                opcode
+            ));
+        }
+    }
+
+    Ok(header.fixed_protocol_return_data)
+}
+
+fn copy_protocol_read_data(
+    packet: &AlignedBuffer,
+    returned: u32,
+    opcode: u8,
+    output: &mut [u8],
+) -> Result<u32, String> {
+    let result = validate_protocol_response(packet, returned, opcode)?;
+    let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+    output.copy_from_slice(&packet.as_bytes()[data_offset..data_offset + output.len()]);
+    Ok(result)
+}
+
+fn extract_identify_response(
+    packet: &AlignedBuffer,
+    returned: u32,
+) -> Result<[u8; IDENTIFY_DATA_LEN], String> {
+    if returned as usize > packet.len
+        || (returned as usize) < PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN
+    {
+        return Err("NVMe identify query returned an invalid byte count".into());
+    }
+
+    let bytes = packet.as_bytes();
+    let protocol_offset = u32::from_le_bytes(bytes[24..28].try_into().unwrap()) as usize;
+    let protocol_length = u32::from_le_bytes(bytes[28..32].try_into().unwrap()) as usize;
+    let data_offset = PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN
+        .checked_add(protocol_offset)
+        .ok_or_else(|| "NVMe identify query returned an invalid data offset".to_string())?;
+    let data_end = data_offset
+        .checked_add(IDENTIFY_DATA_LEN)
+        .ok_or_else(|| "NVMe identify query returned an invalid data length".to_string())?;
+    if protocol_length < IDENTIFY_DATA_LEN
+        || data_end > bytes.len()
+        || data_end > returned as usize
+    {
+        return Err("NVMe identify query returned an invalid data buffer".into());
+    }
+
+    let mut identify = [0u8; IDENTIFY_DATA_LEN];
+    identify.copy_from_slice(&bytes[data_offset..data_end]);
+    Ok(identify)
+}
+
 pub struct NvmeDevice {
     handle: HANDLE,
     timeout_seconds: u32,
@@ -222,10 +305,8 @@ impl NvmeDevice {
             buf.len(),
             self.timeout_seconds,
         );
-        let result = self.submit(&mut packet, opcode)?;
-        let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
-        buf.copy_from_slice(&packet.as_bytes()[data_offset..data_offset + buf.len()]);
-        Ok(result)
+        let (_, returned) = self.submit(&mut packet, opcode)?;
+        copy_protocol_read_data(&packet, returned, opcode, buf)
     }
 
     pub fn admin_write(
@@ -250,7 +331,7 @@ impl NvmeDevice {
         );
         let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
         packet.as_mut_bytes()[data_offset..data_offset + buf.len()].copy_from_slice(buf);
-        self.submit(&mut packet, opcode)
+        self.submit(&mut packet, opcode).map(|(result, _)| result)
     }
 
     pub fn admin_no_data(
@@ -272,7 +353,7 @@ impl NvmeDevice {
             0,
             self.timeout_seconds,
         );
-        self.submit(&mut packet, opcode)
+        self.submit(&mut packet, opcode).map(|(result, _)| result)
     }
 
     pub fn identify_controller(&self) -> Result<[u8; 4096], String> {
@@ -297,20 +378,10 @@ impl NvmeDevice {
             ));
         }
 
-        let bytes = packet.as_bytes();
-        let protocol_offset = u32::from_le_bytes(bytes[24..28].try_into().unwrap()) as usize;
-        let protocol_length = u32::from_le_bytes(bytes[28..32].try_into().unwrap()) as usize;
-        let data_offset = PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN + protocol_offset;
-        if protocol_length < IDENTIFY_DATA_LEN || data_offset + IDENTIFY_DATA_LEN > bytes.len() {
-            return Err("NVMe identify query returned an invalid data buffer".into());
-        }
-
-        let mut identify = [0u8; IDENTIFY_DATA_LEN];
-        identify.copy_from_slice(&bytes[data_offset..data_offset + IDENTIFY_DATA_LEN]);
-        Ok(identify)
+        extract_identify_response(&packet, returned)
     }
 
-    fn submit(&self, packet: &mut AlignedBuffer, opcode: u8) -> Result<u32, String> {
+    fn submit(&self, packet: &mut AlignedBuffer, opcode: u8) -> Result<(u32, u32), String> {
         let mut returned = 0u32;
         let ok = unsafe {
             DeviceIoControl(
@@ -332,14 +403,7 @@ impl NvmeDevice {
             ));
         }
 
-        let header = packet.header();
-        if header.return_status != STORAGE_PROTOCOL_STATUS_SUCCESS {
-            return Err(format!(
-                "NVMe command rejected: return status 0x{:x}, NVMe status 0x{:x} (opcode 0x{:02x})",
-                header.return_status, header.error_code, opcode
-            ));
-        }
-        Ok(header.fixed_protocol_return_data)
+        validate_protocol_response(packet, returned, opcode).map(|result| (result, returned))
     }
 }
 
@@ -418,5 +482,51 @@ mod tests {
     fn protocol_packet_uses_requested_timeout() {
         let packet = build_protocol_command(DataDirection::None, 0xC1, 0, [0; 6], 0, 37);
         assert_eq!(packet.header().timeout_value, 37);
+    }
+
+    #[test]
+    fn simulated_nvme_response_rejects_short_and_partial_transfers() {
+        let mut packet = build_protocol_command(
+            DataDirection::Read,
+            0xC1,
+            0,
+            [0; 6],
+            512,
+            DEFAULT_TIMEOUT_SECONDS,
+        );
+        packet.header_mut().return_status = STORAGE_PROTOCOL_STATUS_SUCCESS;
+
+        assert!(validate_protocol_response(&packet, 40, 0xC1).is_err());
+
+        packet.header_mut().data_from_device_transfer_length = 256;
+        assert!(validate_protocol_response(&packet, packet.len as u32, 0xC1).is_err());
+    }
+
+    #[test]
+    fn simulated_identify_response_rejects_malformed_offset() {
+        let mut packet = build_identify_query();
+        packet.as_mut_bytes()[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert!(extract_identify_response(&packet, packet.len as u32).is_err());
+    }
+
+    #[test]
+    fn simulated_nvme_response_copies_valid_read_data() {
+        let mut packet = build_protocol_command(
+            DataDirection::Read,
+            0xC1,
+            0,
+            [0; 6],
+            4,
+            DEFAULT_TIMEOUT_SECONDS,
+        );
+        packet.header_mut().return_status = STORAGE_PROTOCOL_STATUS_SUCCESS;
+        let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+        packet.as_mut_bytes()[data_offset..data_offset + 4].copy_from_slice(&[1, 2, 3, 4]);
+        let mut output = [0u8; 4];
+
+        copy_protocol_read_data(&packet, packet.len as u32, 0xC1, &mut output).unwrap();
+
+        assert_eq!(output, [1, 2, 3, 4]);
     }
 }

@@ -20,6 +20,7 @@ const ATA_FLAGS_DATA_OUT: u16 = 1 << 2;
 const ATA_FLAGS_48BIT_COMMAND: u16 = 1 << 3;
 const ATA_FLAGS_USE_DMA: u16 = 1 << 4;
 const ATA_STATUS_ERROR: u8 = 1;
+const ATA_STATUS_DEVICE_FAULT: u8 = 1 << 5;
 #[cfg(test)]
 const DEFAULT_TIMEOUT_SECONDS: u32 = 10;
 
@@ -135,6 +136,56 @@ fn build_ata_packet(
     packet
 }
 
+fn validate_ata_response(
+    packet: &AlignedBuffer,
+    returned: u32,
+    command: u8,
+    expected_data_len: usize,
+) -> Result<(), String> {
+    let header_len = size_of::<AtaPassThroughEx>();
+    if returned as usize > packet.len || (returned as usize) < header_len {
+        return Err(format!(
+            "ATA pass-through returned an invalid byte count {} (command 0x{:02x})",
+            returned, command
+        ));
+    }
+
+    let header = packet.header();
+    if header.data_transfer_length as usize != expected_data_len {
+        return Err(format!(
+            "ATA command returned {} of {} requested bytes (command 0x{:02x})",
+            header.data_transfer_length, expected_data_len, command
+        ));
+    }
+    if expected_data_len != 0 && (returned as usize) < header_len + expected_data_len {
+        return Err(format!(
+            "ATA pass-through response ended before its data buffer (command 0x{:02x})",
+            command
+        ));
+    }
+
+    let task_file = header.current_task_file;
+    if task_file[6] & (ATA_STATUS_ERROR | ATA_STATUS_DEVICE_FAULT) != 0 {
+        return Err(format!(
+            "ATA command 0x{:02x} failed: status=0x{:02x}, error=0x{:02x}",
+            command, task_file[6], task_file[0]
+        ));
+    }
+    Ok(())
+}
+
+fn copy_ata_read_data(
+    packet: &AlignedBuffer,
+    returned: u32,
+    command: u8,
+    output: &mut [u8],
+) -> Result<(), String> {
+    validate_ata_response(packet, returned, command, output.len())?;
+    let data_offset = size_of::<AtaPassThroughEx>();
+    output.copy_from_slice(&packet.as_bytes()[data_offset..data_offset + output.len()]);
+    Ok(())
+}
+
 pub struct AtaDevice {
     handle: HANDLE,
     timeout_seconds: u32,
@@ -237,7 +288,7 @@ impl AtaDevice {
         );
         let offset = size_of::<AtaPassThroughEx>();
         packet.as_mut_bytes()[offset..offset + buf.len()].copy_from_slice(buf);
-        self.submit(&mut packet, command)
+        self.submit(&mut packet, command).map(|_| ())
     }
 
     pub fn ata_no_data(
@@ -264,7 +315,7 @@ impl AtaDevice {
             0,
             self.timeout_seconds,
         );
-        self.submit(&mut packet, command)
+        self.submit(&mut packet, command).map(|_| ())
     }
 
     pub fn ata_read_ext(
@@ -338,7 +389,7 @@ impl AtaDevice {
             0,
             self.timeout_seconds,
         );
-        self.submit(&mut packet, command)
+        self.submit(&mut packet, command).map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -369,13 +420,12 @@ impl AtaDevice {
             buf.len(),
             self.timeout_seconds,
         );
-        self.submit(&mut packet, command)?;
-        let offset = size_of::<AtaPassThroughEx>();
-        buf.copy_from_slice(&packet.as_bytes()[offset..offset + buf.len()]);
-        Ok(())
+        let returned = self.submit(&mut packet, command)?;
+        copy_ata_read_data(&packet, returned, command, buf)
     }
 
-    fn submit(&self, packet: &mut AlignedBuffer, command: u8) -> Result<(), String> {
+    fn submit(&self, packet: &mut AlignedBuffer, command: u8) -> Result<u32, String> {
+        let expected_data_len = packet.len - size_of::<AtaPassThroughEx>();
         let mut returned = 0u32;
         let ok = unsafe {
             DeviceIoControl(
@@ -397,14 +447,8 @@ impl AtaDevice {
             ));
         }
 
-        let task_file = packet.header().current_task_file;
-        if task_file[6] & ATA_STATUS_ERROR != 0 {
-            return Err(format!(
-                "ATA command 0x{:02x} failed: status=0x{:02x}, error=0x{:02x}",
-                command, task_file[6], task_file[0]
-            ));
-        }
-        Ok(())
+        validate_ata_response(packet, returned, command, expected_data_len)?;
+        Ok(returned)
     }
 }
 
@@ -486,5 +530,58 @@ mod tests {
             23,
         );
         assert_eq!(packet.header().timeout_value, 23);
+    }
+
+    #[test]
+    fn simulated_ata_response_rejects_short_partial_and_fault_status() {
+        let mut packet = build_ata_packet(
+            AtaDirection::Read,
+            false,
+            0xEC,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0xE0,
+            None,
+            512,
+            DEFAULT_TIMEOUT_SECONDS,
+        );
+
+        assert!(validate_ata_response(&packet, 8, 0xEC, 512).is_err());
+
+        packet.header_mut().data_transfer_length = 256;
+        assert!(validate_ata_response(&packet, packet.len as u32, 0xEC, 512).is_err());
+
+        packet.header_mut().data_transfer_length = 512;
+        packet.header_mut().current_task_file[6] = 0x20;
+        assert!(validate_ata_response(&packet, packet.len as u32, 0xEC, 512).is_err());
+    }
+
+    #[test]
+    fn simulated_ata_response_copies_valid_read_data() {
+        let mut packet = build_ata_packet(
+            AtaDirection::Read,
+            false,
+            0xEC,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0xE0,
+            None,
+            4,
+            DEFAULT_TIMEOUT_SECONDS,
+        );
+        packet.header_mut().current_task_file[6] = 0x50;
+        let data_offset = size_of::<AtaPassThroughEx>();
+        packet.as_mut_bytes()[data_offset..data_offset + 4].copy_from_slice(&[5, 6, 7, 8]);
+        let mut output = [0u8; 4];
+
+        copy_ata_read_data(&packet, packet.len as u32, 0xEC, &mut output).unwrap();
+
+        assert_eq!(output, [5, 6, 7, 8]);
     }
 }
