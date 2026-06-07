@@ -15,10 +15,9 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 
 use crate::windows::format_windows_error;
 
-const IOCTL_STORAGE_PROTOCOL_COMMAND: u32 = 0x002D_0C00;
+const IOCTL_STORAGE_PROTOCOL_COMMAND: u32 = 0x002D_D3C0;
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
 const STORAGE_PROTOCOL_STRUCTURE_VERSION: u32 = 1;
-const STORAGE_PROTOCOL_COMMAND_SIZE: u32 = 84;
 const PROTOCOL_TYPE_NVME: u32 = 3;
 const STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST: u32 = 0x8000_0000;
 const STORAGE_PROTOCOL_STATUS_SUCCESS: u32 = 1;
@@ -120,7 +119,7 @@ fn build_protocol_command(
 
     *packet.header_mut() = StorageProtocolCommand {
         version: STORAGE_PROTOCOL_STRUCTURE_VERSION,
-        length: STORAGE_PROTOCOL_COMMAND_SIZE,
+        length: size_of::<StorageProtocolCommand>() as u32,
         protocol_type: PROTOCOL_TYPE_NVME,
         flags: STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST,
         command_length: NVME_COMMAND_LEN as u32,
@@ -612,6 +611,28 @@ mod tests {
         assert_eq!(
             &bytes[28..32],
             &(COMMAND_EFFECTS_LOG_LEN as u32).to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn storage_protocol_ioctl_matches_windows_sdk() {
+        assert_eq!(IOCTL_STORAGE_PROTOCOL_COMMAND, 0x002D_D3C0);
+    }
+
+    #[test]
+    fn protocol_header_length_matches_windows_sdk_structure() {
+        let packet = build_protocol_command(
+            DataDirection::None,
+            0xF2,
+            0,
+            [0; 6],
+            0,
+            DEFAULT_TIMEOUT_SECONDS,
+        );
+
+        assert_eq!(
+            packet.header().length as usize,
+            size_of::<StorageProtocolCommand>()
         );
     }
 }

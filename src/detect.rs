@@ -74,6 +74,7 @@ const SMI_VID: u16 = 0x2646;
 const RTL_VID: u16 = 0x10EC;
 const PHISON_VID: u16 = 0x1987;
 const MAXIO_VID: u16 = 0x1E4B;
+const INNOGRIT_VID: u16 = 0x1DBE;
 
 fn detect_realtek(fw: &str, vid: u16, ssvid: u16) -> Option<ControllerType> {
     for &(prefix, name, variant) in RTL_FW_PREFIXES {
@@ -193,6 +194,9 @@ pub fn detect_metadata(info: &crate::nvme::ControllerInfo) -> Option<ControllerT
     if info.vid == MAXIO_VID || info.ssvid == MAXIO_VID {
         return Some(ControllerType::Maxio("Maxio (by VID)".into()));
     }
+    if info.vid == INNOGRIT_VID || info.ssvid == INNOGRIT_VID {
+        return Some(ControllerType::Innogrit("Innogrit (by VID)".into()));
+    }
 
     None
 }
@@ -236,6 +240,22 @@ mod tests {
         assert!(matches!(
             detect_metadata(&info),
             Some(ControllerType::Phison(_))
+        ));
+    }
+
+    #[test]
+    fn metadata_only_detection_recognizes_innogrit_vid() {
+        let info = crate::nvme::ControllerInfo {
+            vid: 0x1DBE,
+            ssvid: 0x5236,
+            serial: String::new(),
+            model: "XPG GAMMIX S70 BLADE".into(),
+            firmware: "3.2.F.74".into(),
+        };
+
+        assert!(matches!(
+            detect_metadata(&info),
+            Some(ControllerType::Innogrit(_))
         ));
     }
 }
