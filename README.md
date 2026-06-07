@@ -216,41 +216,6 @@ options:
 `--no-probe` prevents controller-family probing on both NVMe and SATA. A forced
 `--controller` selection prints a warning because it bypasses auto-detection.
 
-## Windows Port Status
-
-The Windows transport, command construction, response validation, device
-classification, timeout handling, and simulated failure paths are implemented.
-The project still has remaining work because low-level storage behavior depends
-on the physical controller, firmware, Windows storage driver, and connection
-type. A simulation cannot prove that a real driver accepts every vendor opcode
-or returns buffers in exactly the same way on every supported controller.
-
-Hardware validation should be completed before describing the Windows port as
-production-ready. The important tests are:
-
-- listing and identifying native NVMe and SATA drives;
-- reading flash IDs from at least one supported NVMe and SATA controller;
-- exercising NVMe read, write, and no-data command paths;
-- exercising ATA PIO, DMA, 48-bit, read, write, and no-data paths;
-- checking timeouts, permission errors, unsupported commands, and multiple
-  physical drives;
-- confirming that failed automatic probes return promptly and leave the drive
-  operating normally.
-
-This work should be done on disposable or fully backed-up systems by someone
-who can identify the installed controllers. It is required for a dependable
-public release, but not required to continue reviewing or developing the port.
-
-Controller-by-controller compatibility testing should continue as hardware
-becomes available. Windows may reject a command that works on Linux because
-StorNVMe, StorAHCI, a RAID driver, a USB bridge, or a vendor driver applies
-different pass-through rules.
-
-Cancellation of an in-flight command and more detailed NVMe error-information
-decoding would improve diagnostics, but they are not required for the core
-port. Windows CI, packaging, release artifacts, and 32-bit Windows support are
-intentionally outside the current scope.
-
 ## Platform Notes
 
 ### Windows
