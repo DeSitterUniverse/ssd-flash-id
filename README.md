@@ -95,6 +95,109 @@ YMTC, SanDisk, and others. Reports technology node (e.g. 176L, 232L, BiCS5,
 
 ## Usage
 
+### Windows
+
+#### 1. Build
+
+Install [Rust](https://www.rust-lang.org/tools/install) with the stable MSVC
+toolchain, then run:
+
+```powershell
+git clone https://github.com/DeSitterUniverse/ssd-flash-id.git
+cd ssd-flash-id
+git switch windows-port
+cargo build --release
+```
+
+The executable is created at:
+
+```text
+target\release\ssd-flash-id.exe
+```
+
+#### 2. Open an Administrator terminal
+
+Raw physical drives require Administrator privileges:
+
+1. Open the Start menu.
+2. Search for **PowerShell** or **Windows Terminal**.
+3. Select **Run as administrator**.
+4. Change to the cloned repository directory.
+
+#### 3. List detected drives
+
+```powershell
+.\target\release\ssd-flash-id.exe --list
+```
+
+The command prints paths such as `\\.\PhysicalDrive0`. Confirm the model and
+serial number before running vendor commands against a drive.
+
+#### 4. Inspect a drive
+
+```powershell
+.\target\release\ssd-flash-id.exe \\.\PhysicalDrive0
+```
+
+Start with metadata-only controller detection if the drive or controller is
+unknown:
+
+```powershell
+.\target\release\ssd-flash-id.exe --no-probe \\.\PhysicalDrive0
+```
+
+`--no-probe` prevents controller-family probing, but reading the flash ID still
+requires the vendor command for the controller selected from metadata.
+
+If a USB bridge or RAID driver makes the protocol ambiguous, specify it
+explicitly:
+
+```powershell
+.\target\release\ssd-flash-id.exe --device-type nvme \\.\PhysicalDrive2
+.\target\release\ssd-flash-id.exe --device-type ata \\.\PhysicalDrive2
+```
+
+Some USB bridges, RAID drivers, and vendor storage drivers block pass-through
+commands entirely. `--device-type` cannot bypass that driver limitation.
+
+Force a controller only when its family is already known:
+
+```powershell
+.\target\release\ssd-flash-id.exe --controller phison \\.\PhysicalDrive0
+.\target\release\ssd-flash-id.exe --controller smi-sata \\.\PhysicalDrive1
+```
+
+Increase the default ten-second command timeout when required:
+
+```powershell
+.\target\release\ssd-flash-id.exe --timeout-seconds 30 \\.\PhysicalDrive0
+```
+
+#### 5. Interpret common errors
+
+- `administrator privileges required`: reopen the terminal as Administrator.
+- `could not determine the storage protocol`: add `--device-type nvme` or
+  `--device-type ata` after confirming the drive type.
+- `drive does not mark it supported in Command Effects Log page 0x05`: the
+  Windows NVMe driver will not allow that vendor opcode.
+- `pass-through failed`: the drive, bridge, RAID layer, or storage driver
+  rejected the low-level command.
+- `could not auto-detect controller type`: retry with `--no-probe`, or use
+  `--controller` only if the controller family is known.
+
+Do not experiment with forced controller families on a drive containing
+important data. Vendor-specific commands operate below the file-system layer.
+
+### Linux
+
+```bash
+sudo ssd-flash-id --list
+sudo ssd-flash-id /dev/nvme0
+sudo ssd-flash-id /dev/sda
+```
+
+### Options
+
 ```
 ssd-flash-id [options] [device]
 
@@ -110,14 +213,43 @@ options:
     --timeout-seconds   command timeout in seconds (default: 10)
 ```
 
-Auto-detects the controller type. NVMe devices are found automatically. SATA
-devices require an explicit path:
-
-- Windows: `ssd-flash-id.exe \\.\PhysicalDrive0`
-- Linux: `ssd-flash-id /dev/sda`
-
 `--no-probe` prevents controller-family probing on both NVMe and SATA. A forced
 `--controller` selection prints a warning because it bypasses auto-detection.
+
+## Windows Port Status
+
+The Windows transport, command construction, response validation, device
+classification, timeout handling, and simulated failure paths are implemented.
+The project still has remaining work because low-level storage behavior depends
+on the physical controller, firmware, Windows storage driver, and connection
+type. A simulation cannot prove that a real driver accepts every vendor opcode
+or returns buffers in exactly the same way on every supported controller.
+
+Hardware validation should be completed before describing the Windows port as
+production-ready. The important tests are:
+
+- listing and identifying native NVMe and SATA drives;
+- reading flash IDs from at least one supported NVMe and SATA controller;
+- exercising NVMe read, write, and no-data command paths;
+- exercising ATA PIO, DMA, 48-bit, read, write, and no-data paths;
+- checking timeouts, permission errors, unsupported commands, and multiple
+  physical drives;
+- confirming that failed automatic probes return promptly and leave the drive
+  operating normally.
+
+This work should be done on disposable or fully backed-up systems by someone
+who can identify the installed controllers. It is required for a dependable
+public release, but not required to continue reviewing or developing the port.
+
+Controller-by-controller compatibility testing should continue as hardware
+becomes available. Windows may reject a command that works on Linux because
+StorNVMe, StorAHCI, a RAID driver, a USB bridge, or a vendor driver applies
+different pass-through rules.
+
+Cancellation of an in-flight command and more detailed NVMe error-information
+decoding would improve diagnostics, but they are not required for the core
+port. Windows CI, packaging, release artifacts, and 32-bit Windows support are
+intentionally outside the current scope.
 
 ## Platform Notes
 
