@@ -1,4 +1,5 @@
 pub mod ata_identify_fid;
+pub mod innogrit;
 pub mod jm_sata;
 pub mod marvell;
 pub mod maxio;

@@ -13,7 +13,6 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
-use super::admin_vendor_command_format_in_spec;
 use crate::windows::format_windows_error;
 
 const IOCTL_STORAGE_PROTOCOL_COMMAND: u32 = 0x002D_D3C0;
@@ -305,7 +304,6 @@ pub struct NvmeDevice {
     adapter_handle: Option<HANDLE>,
     timeout_seconds: u32,
     command_effects: RefCell<Option<[u8; COMMAND_EFFECTS_LOG_LEN]>>,
-    standard_admin_vendor_format: RefCell<Option<bool>>,
 }
 
 fn open_handle(path: &str) -> Result<HANDLE, String> {
@@ -384,7 +382,6 @@ impl NvmeDevice {
             adapter_handle,
             timeout_seconds,
             command_effects: RefCell::new(None),
-            standard_admin_vendor_format: RefCell::new(None),
         })
     }
 
@@ -400,7 +397,6 @@ impl NvmeDevice {
         cdw15: u32,
         buf: &mut [u8],
     ) -> Result<u32, String> {
-        self.ensure_admin_vendor_data_format(opcode)?;
         self.ensure_admin_command_supported(opcode)?;
         let mut packet = build_protocol_command(
             DataDirection::Read,
@@ -426,7 +422,6 @@ impl NvmeDevice {
         cdw15: u32,
         buf: &[u8],
     ) -> Result<u32, String> {
-        self.ensure_admin_vendor_data_format(opcode)?;
         self.ensure_admin_command_supported(opcode)?;
         let mut packet = build_protocol_command(
             DataDirection::Write,
@@ -468,28 +463,6 @@ impl NvmeDevice {
         let mut packet = build_identify_query();
         let returned = self.submit_query(&mut packet, "NVMe identify query")?;
         extract_identify_response(&packet, returned)
-    }
-
-    fn ensure_admin_vendor_data_format(&self, opcode: u8) -> Result<(), String> {
-        if opcode < 0xC0 {
-            return Ok(());
-        }
-        if self.standard_admin_vendor_format.borrow().is_none() {
-            let identify = self.identify_controller()?;
-            *self.standard_admin_vendor_format.borrow_mut() =
-                Some(admin_vendor_command_format_in_spec(&identify));
-        }
-        if self
-            .standard_admin_vendor_format
-            .borrow()
-            .is_some_and(|supported| supported)
-        {
-            Ok(())
-        } else {
-            Err(format!(
-                "Windows StorNVMe cannot safely map data for admin vendor opcode 0x{opcode:02x}: the controller reports AVSCC.CommandFormatInSpec=0 (vendor-specific command format)"
-            ))
-        }
     }
 
     fn ensure_admin_command_supported(&self, opcode: u8) -> Result<(), String> {
@@ -610,6 +583,7 @@ impl Drop for NvmeDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nvme::admin_vendor_command_format_in_spec;
 
     #[test]
     fn encodes_nvme_admin_command_dwords() {
@@ -754,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn proprietary_admin_vendor_format_rejects_data_transfer() {
+    fn reads_admin_vendor_command_format_flag() {
         let mut identify = [0u8; IDENTIFY_DATA_LEN];
         identify[264] = 0;
         assert!(!admin_vendor_command_format_in_spec(&identify));

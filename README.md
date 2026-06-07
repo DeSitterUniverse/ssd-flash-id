@@ -74,6 +74,7 @@ sudo ./target/release/ssd-flash-id --list
 | Phison | PS5012 (E12), PS5016 (E16), PS5018 (E18), PS5019 (E19T), PS5021 (E21T), PS5026 (E26), PS5027 (E27T) |
 | Maxio | MAP1001, MAP1002, MAP1003, MAP1201, MAP1202, MAP1601, MAP1602 |
 | Marvell | 88NV1160, 88NV1140 |
+| Innogrit | IG5208, IG5216, IG5220, IG5236, IG5266 |
 | Tenafe | TC2200, TC2201 |
 
 ### SATA
@@ -207,7 +208,7 @@ options:
     -l, --list          list NVMe and SATA devices
     --device-type       force physical-drive protocol: nvme or ata
     -c, --controller    force controller type:
-                        nvme: smi, rtl, phison, maxio, marvell, tenafe
+                        nvme: smi, rtl, phison, maxio, marvell, innogrit, tenafe
                         sata: jm, smi-sata, yeestor, sandforce, rtl-sata
     --rtl-variant       force Realtek NVMe variant: v1 or v2
     --raw               dump raw flash ID bytes without decoding
@@ -230,8 +231,8 @@ options:
 - StorNVMe accepts a vendor-specific opcode only when the drive advertises it
   as supported in the NVMe Command Supported and Effects log. The Windows
   transport checks that log before sending each vendor opcode.
-- StorNVMe also requires a command format it can map. The Windows transport
-  checks `AVSCC.CommandFormatInSpec` before vendor commands that transfer data.
+- StorNVMe also requires a command format it can map. After a failed vendor
+  command, the CLI reports `AVSCC.CommandFormatInSpec=0` as likely context.
 - USB bridges, RAID drivers, and vendor storage drivers may block pass-through
   commands.
 
@@ -246,10 +247,12 @@ controller-family-dependent. A device is likely unsupported when:
 - its installed storage driver does not implement
   `IOCTL_STORAGE_PROTOCOL_COMMAND`.
 
-Verified incompatible hardware: Innogrit IG5236 firmware `3.2.F.74` reports
-`AVSCC.CommandFormatInSpec=0`. Innogrit support is therefore not included.
-Other controller families must be evaluated from their actual Identify and
-Command Effects data; model or family names alone are insufficient.
+Known incompatible Windows combination: Innogrit IG5236 firmware `3.2.F.74`
+reports `AVSCC.CommandFormatInSpec=0` and Microsoft StorNVMe rejects its `0xF2`
+data transfer. Normal Innogrit support remains available because other
+firmware, drivers, and Linux may accept the command. All controller families
+must be evaluated from their actual Identify and Command Effects data; model
+or family names alone are insufficient.
 
 ### Linux
 
