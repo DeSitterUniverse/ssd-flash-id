@@ -4,13 +4,14 @@ mod detect;
 mod nand_db;
 mod nvme;
 
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::FileTypeExt;
 
-use crate::ata::{parse_ata_identify, AtaDevice};
+use crate::ata::{AtaDevice, parse_ata_identify};
 use crate::controllers::FlashIdResult;
 use crate::detect::{ControllerType, RtlVariant};
 use crate::nand_db::{describe_flash, format_flash_id_hex};
-use crate::nvme::{parse_identify, NvmeDevice};
+use crate::nvme::{NvmeDevice, parse_identify};
 
 struct Args {
     device: Option<String>,
@@ -99,6 +100,7 @@ options:
 }
 
 fn check_root() {
+    #[cfg(target_os = "linux")]
     if unsafe { libc::geteuid() } != 0 {
         eprintln!("error: root privileges required\n");
         eprintln!("try: sudo ssd-flash-id [device]");
@@ -106,6 +108,7 @@ fn check_root() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn find_nvme_devices() -> Vec<String> {
     let mut devices = Vec::new();
     let dir = match std::fs::read_dir("/dev") {
@@ -138,6 +141,12 @@ fn find_nvme_devices() -> Vec<String> {
     devices
 }
 
+#[cfg(windows)]
+fn find_nvme_devices() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
 fn find_sata_devices() -> Vec<String> {
     let mut devices = Vec::new();
     let dir = match std::fs::read_dir("/dev") {
@@ -166,6 +175,12 @@ fn find_sata_devices() -> Vec<String> {
     devices
 }
 
+#[cfg(windows)]
+fn find_sata_devices() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
 fn is_sata_path(path: &str) -> bool {
     let name = std::path::Path::new(path)
         .file_name()
@@ -185,6 +200,10 @@ fn is_sata_path(path: &str) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn is_sata_path(path: &str) -> bool {
+    path.to_ascii_lowercase().contains("sata")
+}
 fn list_devices() {
     let nvme_devices = find_nvme_devices();
     let sata_devices = find_sata_devices();
@@ -353,11 +372,7 @@ fn run_nvme(dev_path: &str, args: &Args) {
             print_banks(&result, args.raw);
         }
         Err(e) => {
-            eprintln!(
-                "error: {} flash ID read failed: {}\n",
-                ct.name(),
-                e
-            );
+            eprintln!("error: {} flash ID read failed: {}\n", ct.name(), e);
             eprintln!(
                 "the {} vendor command (--controller {}) was rejected by this device.",
                 controller_family_display(&ct),
@@ -432,10 +447,9 @@ fn run_sata(dev_path: &str, args: &Args) {
                 .or_else(|_| try_rtl_sata(&dev))
                 .or_else(|_| {
                     // Last resort: check if flash ID was embedded in ATA IDENTIFY data
-                    identify_fid
-                        .clone()
-                        .map(|r| (r, "SATA"))
-                        .ok_or_else(|| "no vendor commands succeeded and no flash ID in IDENTIFY data".to_string())
+                    identify_fid.clone().map(|r| (r, "SATA")).ok_or_else(|| {
+                        "no vendor commands succeeded and no flash ID in IDENTIFY data".to_string()
+                    })
                 })
         }
     };
@@ -447,10 +461,7 @@ fn run_sata(dev_path: &str, args: &Args) {
             eprintln!("\nmodel: {}", info.model);
             eprintln!("firmware: {}", info.firmware);
             eprintln!("\nthis SATA device may not have a supported controller.");
-            eprintln!(
-                "supported sata types: {}",
-                SATA_TYPES.join(", ")
-            );
+            eprintln!("supported sata types: {}", SATA_TYPES.join(", "));
             std::process::exit(1);
         }
     };
