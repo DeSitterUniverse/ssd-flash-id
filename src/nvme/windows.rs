@@ -17,6 +17,8 @@ use crate::windows::format_windows_error;
 
 const IOCTL_STORAGE_PROTOCOL_COMMAND: u32 = 0x002D_D3C0;
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
+const IOCTL_SCSI_GET_ADDRESS: u32 = 0x0004_1018;
+const ERROR_INVALID_PARAMETER: u32 = 87;
 const STORAGE_PROTOCOL_STRUCTURE_VERSION: u32 = 1;
 const PROTOCOL_TYPE_NVME: u32 = 3;
 const STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST: u32 = 0x8000_0000;
@@ -27,7 +29,7 @@ const NVME_ERROR_INFO_LEN: usize = 64;
 const PROTOCOL_HEADER_LEN: usize = 80;
 #[cfg(test)]
 const DEFAULT_TIMEOUT_SECONDS: u32 = 10;
-const STORAGE_DEVICE_PROTOCOL_SPECIFIC_PROPERTY: u32 = 50;
+const STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY: u32 = 49;
 const NVME_DATA_TYPE_IDENTIFY: u32 = 1;
 const NVME_DATA_TYPE_LOG_PAGE: u32 = 2;
 const COMMAND_EFFECTS_LOG_ID: u32 = 5;
@@ -58,6 +60,16 @@ struct StorageProtocolCommand {
     fixed_protocol_return_data: u32,
     fixed_protocol_return_data2: u32,
     reserved1: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScsiAddress {
+    length: u32,
+    port_number: u8,
+    path_id: u8,
+    target_id: u8,
+    lun: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -163,7 +175,7 @@ fn build_protocol_query(data_type: u32, request_value: u32, data_len: usize) -> 
     let mut packet = AlignedBuffer::zeroed(data_offset + data_len);
     let bytes = packet.as_mut_bytes();
 
-    bytes[0..4].copy_from_slice(&STORAGE_DEVICE_PROTOCOL_SPECIFIC_PROPERTY.to_le_bytes());
+    bytes[0..4].copy_from_slice(&STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY.to_le_bytes());
     bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
     bytes[8..12].copy_from_slice(&PROTOCOL_TYPE_NVME.to_le_bytes());
     bytes[12..16].copy_from_slice(&data_type.to_le_bytes());
@@ -254,9 +266,7 @@ fn extract_protocol_data<const N: usize>(
     returned: u32,
     description: &str,
 ) -> Result<[u8; N], String> {
-    if returned as usize > packet.len
-        || (returned as usize) < PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN
-    {
+    if returned as usize > packet.len || (returned as usize) < PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN {
         return Err(format!("{} returned an invalid byte count", description));
     }
 
@@ -280,38 +290,85 @@ fn extract_protocol_data<const N: usize>(
 
 pub struct NvmeDevice {
     handle: HANDLE,
+    adapter_handle: Option<HANDLE>,
     timeout_seconds: u32,
     command_effects: RefCell<Option<[u8; COMMAND_EFFECTS_LOG_LEN]>>,
+}
+
+fn open_handle(path: &str) -> Result<HANDLE, String> {
+    let wide_path: Vec<u16> = Path::new(path)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide_path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        Err(format!(
+            "failed to open '{}': {}",
+            path,
+            format_windows_error(unsafe { GetLastError() })
+        ))
+    } else {
+        Ok(handle)
+    }
+}
+
+fn query_scsi_port(handle: HANDLE) -> Result<u8, String> {
+    let mut address = ScsiAddress {
+        length: size_of::<ScsiAddress>() as u32,
+        ..ScsiAddress::default()
+    };
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_SCSI_GET_ADDRESS,
+            null(),
+            0,
+            (&mut address as *mut ScsiAddress).cast::<c_void>(),
+            size_of::<ScsiAddress>() as u32,
+            &mut returned,
+            null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(format!(
+            "failed to resolve storage adapter: {}",
+            format_windows_error(unsafe { GetLastError() })
+        ));
+    }
+    if returned < size_of::<ScsiAddress>() as u32
+        || address.length < size_of::<ScsiAddress>() as u32
+    {
+        return Err("storage adapter returned an invalid SCSI address".to_string());
+    }
+    Ok(address.port_number)
+}
+
+fn scsi_port_path(port_number: u8) -> String {
+    format!(r"\\.\Scsi{}:", port_number)
 }
 
 #[allow(clippy::too_many_arguments)]
 impl NvmeDevice {
     pub fn open_with_timeout(path: &str, timeout_seconds: u32) -> Result<Self, String> {
-        let wide_path: Vec<u16> = Path::new(path)
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let handle = unsafe {
-            CreateFileW(
-                wide_path.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                null(),
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(format!(
-                "failed to open '{}': {}",
-                path,
-                format_windows_error(unsafe { GetLastError() })
-            ));
-        }
+        let handle = open_handle(path)?;
+        let adapter_handle = query_scsi_port(handle)
+            .ok()
+            .and_then(|port_number| open_handle(&scsi_port_path(port_number)).ok());
         Ok(Self {
             handle,
+            adapter_handle,
             timeout_seconds,
             command_effects: RefCell::new(None),
         })
@@ -401,11 +458,7 @@ impl NvmeDevice {
         if self.command_effects.borrow().is_none() {
             let mut packet = build_command_effects_query();
             let returned = self.submit_query(&mut packet, "NVMe command-effects query")?;
-            let log = extract_protocol_data(
-                &packet,
-                returned,
-                "NVMe command-effects query",
-            )?;
+            let log = extract_protocol_data(&packet, returned, "NVMe command-effects query")?;
             *self.command_effects.borrow_mut() = Some(log);
         }
 
@@ -449,6 +502,7 @@ impl NvmeDevice {
     }
 
     fn submit(&self, packet: &mut AlignedBuffer, opcode: u8) -> Result<(u32, u32), String> {
+        let original_packet = packet.as_bytes().to_vec();
         let mut returned = 0u32;
         let ok = unsafe {
             DeviceIoControl(
@@ -463,9 +517,38 @@ impl NvmeDevice {
             )
         };
         if ok == 0 {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_INVALID_PARAMETER
+                && let Some(adapter_handle) = self.adapter_handle
+            {
+                packet.as_mut_bytes().copy_from_slice(&original_packet);
+                returned = 0;
+                let adapter_ok = unsafe {
+                    DeviceIoControl(
+                        adapter_handle,
+                        IOCTL_STORAGE_PROTOCOL_COMMAND,
+                        packet.as_ptr().cast::<c_void>(),
+                        packet.len as u32,
+                        packet.as_mut_ptr().cast::<c_void>(),
+                        packet.len as u32,
+                        &mut returned,
+                        null_mut(),
+                    )
+                };
+                if adapter_ok != 0 {
+                    return validate_protocol_response(packet, returned, opcode)
+                        .map(|result| (result, returned));
+                }
+                return Err(format!(
+                    "NVMe pass-through failed on both the physical drive and storage adapter: {}; adapter retry: {} (opcode 0x{:02x})",
+                    format_windows_error(error),
+                    format_windows_error(unsafe { GetLastError() }),
+                    opcode
+                ));
+            }
             return Err(format!(
                 "NVMe pass-through failed: {} (opcode 0x{:02x})",
-                format_windows_error(unsafe { GetLastError() }),
+                format_windows_error(error),
                 opcode
             ));
         }
@@ -477,6 +560,9 @@ impl NvmeDevice {
 impl Drop for NvmeDevice {
     fn drop(&mut self) {
         unsafe {
+            if let Some(adapter_handle) = self.adapter_handle {
+                CloseHandle(adapter_handle);
+            }
             CloseHandle(self.handle);
         }
     }
@@ -542,7 +628,7 @@ mod tests {
         let packet = build_identify_query();
         let bytes = packet.as_bytes();
 
-        assert_eq!(&bytes[0..4], &50u32.to_le_bytes());
+        assert_eq!(&bytes[0..4], &49u32.to_le_bytes());
         assert_eq!(&bytes[8..12], &PROTOCOL_TYPE_NVME.to_le_bytes());
         assert_eq!(&bytes[12..16], &1u32.to_le_bytes());
         assert_eq!(&bytes[16..20], &1u32.to_le_bytes());
@@ -627,6 +713,17 @@ mod tests {
     #[test]
     fn storage_protocol_ioctl_matches_windows_sdk() {
         assert_eq!(IOCTL_STORAGE_PROTOCOL_COMMAND, 0x002D_D3C0);
+    }
+
+    #[test]
+    fn scsi_address_ioctl_matches_windows_sdk() {
+        assert_eq!(IOCTL_SCSI_GET_ADDRESS, 0x0004_1018);
+        assert_eq!(size_of::<ScsiAddress>(), 8);
+    }
+
+    #[test]
+    fn formats_scsi_port_device_path() {
+        assert_eq!(scsi_port_path(3), r"\\.\Scsi3:");
     }
 
     #[test]
