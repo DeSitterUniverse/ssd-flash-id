@@ -22,7 +22,8 @@ const STORAGE_PROTOCOL_STATUS_SUCCESS: u32 = 1;
 const STORAGE_PROTOCOL_SPECIFIC_NVME_ADMIN_COMMAND: u32 = 1;
 const NVME_COMMAND_LEN: usize = 64;
 const PROTOCOL_HEADER_LEN: usize = 80;
-const TIMEOUT_SECONDS: u32 = 10;
+#[cfg(test)]
+const DEFAULT_TIMEOUT_SECONDS: u32 = 10;
 const STORAGE_DEVICE_PROTOCOL_SPECIFIC_PROPERTY: u32 = 50;
 const NVME_DATA_TYPE_IDENTIFY: u32 = 1;
 const PROTOCOL_SPECIFIC_DATA_LEN: usize = 40;
@@ -106,6 +107,7 @@ fn build_protocol_command(
     nsid: u32,
     cdws: [u32; 6],
     data_len: usize,
+    timeout_seconds: u32,
 ) -> AlignedBuffer {
     let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
     let mut packet = AlignedBuffer::zeroed(data_offset + data_len);
@@ -116,7 +118,7 @@ fn build_protocol_command(
         protocol_type: PROTOCOL_TYPE_NVME,
         flags: STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST,
         command_length: NVME_COMMAND_LEN as u32,
-        timeout_value: TIMEOUT_SECONDS,
+        timeout_value: timeout_seconds,
         command_specific: STORAGE_PROTOCOL_SPECIFIC_NVME_ADMIN_COMMAND,
         ..StorageProtocolCommand::default()
     };
@@ -163,11 +165,12 @@ fn build_identify_query() -> AlignedBuffer {
 
 pub struct NvmeDevice {
     handle: HANDLE,
+    timeout_seconds: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
 impl NvmeDevice {
-    pub fn open(path: &str) -> Result<Self, String> {
+    pub fn open_with_timeout(path: &str, timeout_seconds: u32) -> Result<Self, String> {
         let wide_path: Vec<u16> = Path::new(path)
             .as_os_str()
             .encode_wide()
@@ -191,7 +194,10 @@ impl NvmeDevice {
                 unsafe { GetLastError() }
             ));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            timeout_seconds,
+        })
     }
 
     pub fn admin_read(
@@ -212,6 +218,7 @@ impl NvmeDevice {
             nsid,
             [cdw10, cdw11, cdw12, cdw13, cdw14, cdw15],
             buf.len(),
+            self.timeout_seconds,
         );
         let result = self.submit(&mut packet, opcode)?;
         let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
@@ -237,6 +244,7 @@ impl NvmeDevice {
             nsid,
             [cdw10, cdw11, cdw12, cdw13, cdw14, cdw15],
             buf.len(),
+            self.timeout_seconds,
         );
         let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
         packet.as_mut_bytes()[data_offset..data_offset + buf.len()].copy_from_slice(buf);
@@ -260,6 +268,7 @@ impl NvmeDevice {
             nsid,
             [cdw10, cdw11, cdw12, cdw13, cdw14, cdw15],
             0,
+            self.timeout_seconds,
         );
         self.submit(&mut packet, opcode)
     }
@@ -352,6 +361,7 @@ mod tests {
             0x1122_3344,
             [0x10, 0x11, 0x12, 0x13, 0x14, 0x15],
             4096,
+            DEFAULT_TIMEOUT_SECONDS,
         );
         let bytes = packet.as_bytes();
         let command = &bytes[PROTOCOL_HEADER_LEN..PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN];
@@ -369,7 +379,14 @@ mod tests {
 
     #[test]
     fn read_packet_places_data_after_aligned_command() {
-        let packet = build_protocol_command(DataDirection::Read, 0x06, 0, [1, 0, 0, 0, 0, 0], 4096);
+        let packet = build_protocol_command(
+            DataDirection::Read,
+            0x06,
+            0,
+            [1, 0, 0, 0, 0, 0],
+            4096,
+            DEFAULT_TIMEOUT_SECONDS,
+        );
         let header = packet.header();
 
         assert_eq!(packet.as_ptr() as usize % std::mem::align_of::<usize>(), 0);
@@ -393,5 +410,11 @@ mod tests {
         assert_eq!(&bytes[16..20], &1u32.to_le_bytes());
         assert_eq!(&bytes[24..28], &40u32.to_le_bytes());
         assert_eq!(&bytes[28..32], &4096u32.to_le_bytes());
+    }
+
+    #[test]
+    fn protocol_packet_uses_requested_timeout() {
+        let packet = build_protocol_command(DataDirection::None, 0xC1, 0, [0; 6], 0, 37);
+        assert_eq!(packet.header().timeout_value, 37);
     }
 }

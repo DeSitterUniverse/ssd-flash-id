@@ -33,6 +33,8 @@ use crate::detect::{ControllerType, RtlVariant};
 use crate::nand_db::{describe_flash, format_flash_id_hex};
 use crate::nvme::{NvmeDevice, parse_identify};
 
+const DEFAULT_TIMEOUT_SECONDS: u32 = 10;
+
 struct Args {
     device: Option<String>,
     device_type: Option<DeviceKind>,
@@ -42,6 +44,7 @@ struct Args {
     list: bool,
     raw: bool,
     no_probe: bool,
+    timeout_seconds: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +66,7 @@ fn parse_args() -> Args {
         list: false,
         raw: false,
         no_probe: false,
+        timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
     };
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -73,6 +77,18 @@ fn parse_args() -> Args {
             "--list" | "-l" => args.list = true,
             "--raw" => args.raw = true,
             "--no-probe" => args.no_probe = true,
+            "--timeout-seconds" => {
+                i += 1;
+                if i < argv.len() {
+                    args.timeout_seconds = parse_timeout_seconds(&argv[i]).unwrap_or_else(|e| {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    });
+                } else {
+                    eprintln!("error: --timeout-seconds requires a value");
+                    std::process::exit(1);
+                }
+            }
             "--device-type" => {
                 i += 1;
                 if i < argv.len() {
@@ -131,6 +147,16 @@ fn parse_args() -> Args {
     args
 }
 
+fn parse_timeout_seconds(value: &str) -> Result<u32, String> {
+    match value.parse::<u32>() {
+        Ok(seconds) if seconds > 0 => Ok(seconds),
+        _ => Err(format!(
+            "invalid timeout '{}' (expected a positive whole number of seconds)",
+            value
+        )),
+    }
+}
+
 fn print_usage() {
     let device_help = if cfg!(windows) {
         r"physical drive path (e.g. \\.\PhysicalDrive0)"
@@ -155,7 +181,8 @@ options:
                         sata: jm, smi-sata, yeestor, sandforce, rtl-sata
     --rtl-variant       force Realtek variant: v1 (RTS5762/63), v2 (RTS5765/66/72)
     --raw               dump raw flash ID bytes as hex
-    --no-probe          detect from identity metadata only"
+    --no-probe          avoid controller-family probe commands
+    --timeout-seconds   command timeout in seconds (default: 10)"
     );
 }
 
@@ -406,7 +433,7 @@ fn storage_bus_type(path: &str) -> Option<u32> {
     }
     Some(u32::from_le_bytes(descriptor[28..32].try_into().ok()?))
 }
-fn list_devices() {
+fn list_devices(timeout_seconds: u32) {
     let nvme_devices = find_nvme_devices();
     let sata_devices = find_sata_devices();
 
@@ -416,7 +443,7 @@ fn list_devices() {
     }
 
     for dev_path in &nvme_devices {
-        match NvmeDevice::open(dev_path) {
+        match NvmeDevice::open_with_timeout(dev_path, timeout_seconds) {
             Ok(dev) => match dev.identify_controller() {
                 Ok(id_data) => {
                     let info = parse_identify(&id_data);
@@ -432,7 +459,7 @@ fn list_devices() {
     }
 
     for dev_path in &sata_devices {
-        match AtaDevice::open(dev_path) {
+        match AtaDevice::open_with_timeout(dev_path, timeout_seconds) {
             Ok(dev) => match dev.ata_identify() {
                 Ok(id_data) => {
                     let info = parse_ata_identify(&id_data);
@@ -506,7 +533,7 @@ fn print_banks(result: &FlashIdResult, raw: bool) {
 }
 
 fn run_nvme(dev_path: &str, args: &Args) {
-    let dev = match NvmeDevice::open(dev_path) {
+    let dev = match NvmeDevice::open_with_timeout(dev_path, args.timeout_seconds) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -608,7 +635,7 @@ fn run_sata(dev_path: &str, args: &Args) {
         std::process::exit(1);
     }
 
-    let dev = match AtaDevice::open(dev_path) {
+    let dev = match AtaDevice::open_with_timeout(dev_path, args.timeout_seconds) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -717,7 +744,7 @@ fn main() {
     check_root();
 
     if args.list {
-        list_devices();
+        list_devices(args.timeout_seconds);
         return;
     }
 
@@ -810,5 +837,12 @@ mod windows_tests {
             DeviceKind::Ambiguous
         );
         assert_eq!(device_kind_from_bus(None), DeviceKind::Unknown);
+    }
+
+    #[test]
+    fn timeout_parser_rejects_zero_and_accepts_positive_seconds() {
+        assert_eq!(parse_timeout_seconds("30"), Ok(30));
+        assert!(parse_timeout_seconds("0").is_err());
+        assert!(parse_timeout_seconds("invalid").is_err());
     }
 }

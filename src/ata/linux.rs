@@ -7,8 +7,6 @@ const SG_DXFER_FROM_DEV: i32 = -3;
 const ATA_PT16_OPCODE: u8 = 0x85;
 const ATA_PT16_CDB_LEN: u8 = 16;
 const SENSE_BUF_LEN: u8 = 32;
-const TIMEOUT_MS: u32 = 10_000;
-
 const PROTO_NON_DATA: u8 = 3;
 const PROTO_PIO_DATA_IN: u8 = 4;
 const PROTO_PIO_DATA_OUT: u8 = 5;
@@ -77,11 +75,12 @@ impl SgIoHdr {
 #[allow(clippy::too_many_arguments)]
 pub struct AtaDevice {
     fd: i32,
+    timeout_ms: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
 impl AtaDevice {
-    pub fn open(path: &str) -> Result<Self, String> {
+    pub fn open_with_timeout(path: &str, timeout_seconds: u32) -> Result<Self, String> {
         let c_path =
             CString::new(path).map_err(|e| format!("invalid device path '{}': {}", path, e))?;
         let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR) };
@@ -94,7 +93,10 @@ impl AtaDevice {
                 errno
             ));
         }
-        Ok(AtaDevice { fd })
+        Ok(AtaDevice {
+            fd,
+            timeout_ms: timeout_seconds.saturating_mul(1_000),
+        })
     }
 
     pub fn ata_identify(&self) -> Result<[u8; 512], String> {
@@ -305,7 +307,7 @@ impl AtaDevice {
         hdr.dxferp = dxferp;
         hdr.cmdp = cdb.as_ptr();
         hdr.sbp = sense.as_mut_ptr();
-        hdr.timeout = TIMEOUT_MS;
+        hdr.timeout = self.timeout_ms;
 
         let ret = unsafe { libc::ioctl(self.fd, SG_IO, &mut hdr as *mut SgIoHdr) };
         if ret < 0 {

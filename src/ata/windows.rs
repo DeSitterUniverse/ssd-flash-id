@@ -18,7 +18,8 @@ const ATA_FLAGS_DATA_OUT: u16 = 1 << 2;
 const ATA_FLAGS_48BIT_COMMAND: u16 = 1 << 3;
 const ATA_FLAGS_USE_DMA: u16 = 1 << 4;
 const ATA_STATUS_ERROR: u8 = 1;
-const TIMEOUT_SECONDS: u32 = 10;
+#[cfg(test)]
+const DEFAULT_TIMEOUT_SECONDS: u32 = 10;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -96,6 +97,7 @@ fn build_ata_packet(
     device: u8,
     previous: Option<[u8; 5]>,
     data_len: usize,
+    timeout_seconds: u32,
 ) -> AlignedBuffer {
     let header_len = size_of::<AtaPassThroughEx>();
     let mut packet = AlignedBuffer::zeroed(header_len + data_len);
@@ -120,7 +122,7 @@ fn build_ata_packet(
         length: header_len as u16,
         ata_flags: flags,
         data_transfer_length: data_len as u32,
-        timeout_value: TIMEOUT_SECONDS,
+        timeout_value: timeout_seconds,
         data_buffer_offset: if data_len == 0 { 0 } else { header_len },
         previous_task_file,
         current_task_file: [
@@ -133,11 +135,12 @@ fn build_ata_packet(
 
 pub struct AtaDevice {
     handle: HANDLE,
+    timeout_seconds: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
 impl AtaDevice {
-    pub fn open(path: &str) -> Result<Self, String> {
+    pub fn open_with_timeout(path: &str, timeout_seconds: u32) -> Result<Self, String> {
         let wide_path: Vec<u16> = Path::new(path)
             .as_os_str()
             .encode_wide()
@@ -161,7 +164,10 @@ impl AtaDevice {
                 unsafe { GetLastError() }
             ));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            timeout_seconds,
+        })
     }
 
     pub fn ata_identify(&self) -> Result<[u8; 512], String> {
@@ -225,6 +231,7 @@ impl AtaDevice {
             device,
             None,
             buf.len(),
+            self.timeout_seconds,
         );
         let offset = size_of::<AtaPassThroughEx>();
         packet.as_mut_bytes()[offset..offset + buf.len()].copy_from_slice(buf);
@@ -253,6 +260,7 @@ impl AtaDevice {
             device,
             None,
             0,
+            self.timeout_seconds,
         );
         self.submit(&mut packet, command)
     }
@@ -326,6 +334,7 @@ impl AtaDevice {
                 prev_lba_high,
             ]),
             0,
+            self.timeout_seconds,
         );
         self.submit(&mut packet, command)
     }
@@ -356,6 +365,7 @@ impl AtaDevice {
             device,
             previous,
             buf.len(),
+            self.timeout_seconds,
         );
         self.submit(&mut packet, command)?;
         let offset = size_of::<AtaPassThroughEx>();
@@ -422,6 +432,7 @@ mod tests {
             0xE0,
             None,
             512,
+            DEFAULT_TIMEOUT_SECONDS,
         );
         assert_eq!(
             packet.header().current_task_file,
@@ -444,6 +455,7 @@ mod tests {
             0x40,
             Some([6, 7, 8, 9, 10]),
             512,
+            DEFAULT_TIMEOUT_SECONDS,
         );
         assert_eq!(
             packet.header().previous_task_file,
@@ -453,5 +465,24 @@ mod tests {
             packet.header().ata_flags,
             ATA_FLAGS_DATA_IN | ATA_FLAGS_48BIT_COMMAND | ATA_FLAGS_USE_DMA
         );
+    }
+
+    #[test]
+    fn ata_packet_uses_requested_timeout() {
+        let packet = build_ata_packet(
+            AtaDirection::None,
+            false,
+            0xEC,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            23,
+        );
+        assert_eq!(packet.header().timeout_value, 23);
     }
 }

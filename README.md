@@ -105,6 +105,8 @@ options:
                         sata: jm, smi-sata, yeestor, sandforce, rtl-sata
     --rtl-variant       force Realtek NVMe variant: v1 or v2
     --raw               dump raw flash ID bytes without decoding
+    --no-probe          avoid controller-family probe commands
+    --timeout-seconds   command timeout in seconds (default: 10)
 ```
 
 Auto-detects the controller type. NVMe devices are found automatically. SATA

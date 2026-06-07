@@ -1,8 +1,6 @@
 use std::ffi::CString;
 
 const NVME_IOCTL_ADMIN_CMD: u64 = 0xC0484E41;
-const TIMEOUT_MS: u32 = 10_000;
-
 #[repr(C)]
 pub struct NvmeAdminCmd {
     pub opcode: u8,
@@ -52,11 +50,12 @@ impl NvmeAdminCmd {
 
 pub struct NvmeDevice {
     fd: i32,
+    timeout_ms: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
 impl NvmeDevice {
-    pub fn open(path: &str) -> Result<Self, String> {
+    pub fn open_with_timeout(path: &str, timeout_seconds: u32) -> Result<Self, String> {
         let c_path =
             CString::new(path).map_err(|e| format!("invalid device path '{}': {}", path, e))?;
         let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY) };
@@ -69,7 +68,10 @@ impl NvmeDevice {
                 errno
             ));
         }
-        Ok(NvmeDevice { fd })
+        Ok(NvmeDevice {
+            fd,
+            timeout_ms: timeout_seconds.saturating_mul(1_000),
+        })
     }
 
     pub fn admin_read(
@@ -95,7 +97,7 @@ impl NvmeDevice {
         cmd.cdw15 = cdw15;
         cmd.addr = buf.as_mut_ptr() as u64;
         cmd.data_len = buf.len() as u32;
-        cmd.timeout_ms = TIMEOUT_MS;
+        cmd.timeout_ms = self.timeout_ms;
 
         self.submit_admin_cmd(&mut cmd)
     }
@@ -123,7 +125,7 @@ impl NvmeDevice {
         cmd.cdw15 = cdw15;
         cmd.addr = buf.as_ptr() as u64;
         cmd.data_len = buf.len() as u32;
-        cmd.timeout_ms = TIMEOUT_MS;
+        cmd.timeout_ms = self.timeout_ms;
 
         self.submit_admin_cmd(&mut cmd)
     }
@@ -148,7 +150,7 @@ impl NvmeDevice {
         cmd.cdw13 = cdw13;
         cmd.cdw14 = cdw14;
         cmd.cdw15 = cdw15;
-        cmd.timeout_ms = TIMEOUT_MS;
+        cmd.timeout_ms = self.timeout_ms;
 
         self.submit_admin_cmd(&mut cmd)
     }
