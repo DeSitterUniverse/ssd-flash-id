@@ -123,8 +123,8 @@ devices require an explicit path:
 - Uses `IOCTL_ATA_PASS_THROUGH` for SATA commands.
 - Requires Administrator privileges.
 - StorNVMe accepts a vendor-specific opcode only when the drive advertises it
-  as supported in the NVMe Command Supported and Effects log. A drive may
-  therefore accept a command on Linux but reject it on Windows.
+  as supported in the NVMe Command Supported and Effects log. The Windows
+  transport checks that log before sending each vendor opcode.
 - USB bridges, RAID drivers, and vendor storage drivers may block pass-through
   commands.
 

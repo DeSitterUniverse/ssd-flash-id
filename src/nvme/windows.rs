@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
@@ -28,6 +29,9 @@ const PROTOCOL_HEADER_LEN: usize = 80;
 const DEFAULT_TIMEOUT_SECONDS: u32 = 10;
 const STORAGE_DEVICE_PROTOCOL_SPECIFIC_PROPERTY: u32 = 50;
 const NVME_DATA_TYPE_IDENTIFY: u32 = 1;
+const NVME_DATA_TYPE_LOG_PAGE: u32 = 2;
+const COMMAND_EFFECTS_LOG_ID: u32 = 5;
+const COMMAND_EFFECTS_LOG_LEN: usize = 4096;
 const PROTOCOL_SPECIFIC_DATA_LEN: usize = 40;
 const PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN: usize = 8;
 const IDENTIFY_DATA_LEN: usize = 4096;
@@ -150,19 +154,36 @@ fn build_protocol_command(
     packet
 }
 
-fn build_identify_query() -> AlignedBuffer {
+fn build_protocol_query(data_type: u32, request_value: u32, data_len: usize) -> AlignedBuffer {
     let data_offset = PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN + PROTOCOL_SPECIFIC_DATA_LEN;
-    let mut packet = AlignedBuffer::zeroed(data_offset + IDENTIFY_DATA_LEN);
+    let mut packet = AlignedBuffer::zeroed(data_offset + data_len);
     let bytes = packet.as_mut_bytes();
 
     bytes[0..4].copy_from_slice(&STORAGE_DEVICE_PROTOCOL_SPECIFIC_PROPERTY.to_le_bytes());
     bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
     bytes[8..12].copy_from_slice(&PROTOCOL_TYPE_NVME.to_le_bytes());
-    bytes[12..16].copy_from_slice(&NVME_DATA_TYPE_IDENTIFY.to_le_bytes());
-    bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&data_type.to_le_bytes());
+    bytes[16..20].copy_from_slice(&request_value.to_le_bytes());
     bytes[24..28].copy_from_slice(&(PROTOCOL_SPECIFIC_DATA_LEN as u32).to_le_bytes());
-    bytes[28..32].copy_from_slice(&(IDENTIFY_DATA_LEN as u32).to_le_bytes());
+    bytes[28..32].copy_from_slice(&(data_len as u32).to_le_bytes());
     packet
+}
+
+fn build_identify_query() -> AlignedBuffer {
+    build_protocol_query(NVME_DATA_TYPE_IDENTIFY, 1, IDENTIFY_DATA_LEN)
+}
+
+fn build_command_effects_query() -> AlignedBuffer {
+    build_protocol_query(
+        NVME_DATA_TYPE_LOG_PAGE,
+        COMMAND_EFFECTS_LOG_ID,
+        COMMAND_EFFECTS_LOG_LEN,
+    )
+}
+
+fn admin_command_supported(log: &[u8; COMMAND_EFFECTS_LOG_LEN], opcode: u8) -> bool {
+    let offset = opcode as usize * size_of::<u32>();
+    u32::from_le_bytes(log[offset..offset + 4].try_into().unwrap()) & 1 != 0
 }
 
 fn validate_protocol_response(
@@ -221,10 +242,18 @@ fn extract_identify_response(
     packet: &AlignedBuffer,
     returned: u32,
 ) -> Result<[u8; IDENTIFY_DATA_LEN], String> {
+    extract_protocol_data(packet, returned, "NVMe identify query")
+}
+
+fn extract_protocol_data<const N: usize>(
+    packet: &AlignedBuffer,
+    returned: u32,
+    description: &str,
+) -> Result<[u8; N], String> {
     if returned as usize > packet.len
         || (returned as usize) < PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN
     {
-        return Err("NVMe identify query returned an invalid byte count".into());
+        return Err(format!("{} returned an invalid byte count", description));
     }
 
     let bytes = packet.as_bytes();
@@ -232,25 +261,23 @@ fn extract_identify_response(
     let protocol_length = u32::from_le_bytes(bytes[28..32].try_into().unwrap()) as usize;
     let data_offset = PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN
         .checked_add(protocol_offset)
-        .ok_or_else(|| "NVMe identify query returned an invalid data offset".to_string())?;
+        .ok_or_else(|| format!("{} returned an invalid data offset", description))?;
     let data_end = data_offset
-        .checked_add(IDENTIFY_DATA_LEN)
-        .ok_or_else(|| "NVMe identify query returned an invalid data length".to_string())?;
-    if protocol_length < IDENTIFY_DATA_LEN
-        || data_end > bytes.len()
-        || data_end > returned as usize
-    {
-        return Err("NVMe identify query returned an invalid data buffer".into());
+        .checked_add(N)
+        .ok_or_else(|| format!("{} returned an invalid data length", description))?;
+    if protocol_length < N || data_end > bytes.len() || data_end > returned as usize {
+        return Err(format!("{} returned an invalid data buffer", description));
     }
 
-    let mut identify = [0u8; IDENTIFY_DATA_LEN];
-    identify.copy_from_slice(&bytes[data_offset..data_end]);
-    Ok(identify)
+    let mut data = [0u8; N];
+    data.copy_from_slice(&bytes[data_offset..data_end]);
+    Ok(data)
 }
 
 pub struct NvmeDevice {
     handle: HANDLE,
     timeout_seconds: u32,
+    command_effects: RefCell<Option<[u8; COMMAND_EFFECTS_LOG_LEN]>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -282,6 +309,7 @@ impl NvmeDevice {
         Ok(Self {
             handle,
             timeout_seconds,
+            command_effects: RefCell::new(None),
         })
     }
 
@@ -297,6 +325,7 @@ impl NvmeDevice {
         cdw15: u32,
         buf: &mut [u8],
     ) -> Result<u32, String> {
+        self.ensure_admin_command_supported(opcode)?;
         let mut packet = build_protocol_command(
             DataDirection::Read,
             opcode,
@@ -321,6 +350,7 @@ impl NvmeDevice {
         cdw15: u32,
         buf: &[u8],
     ) -> Result<u32, String> {
+        self.ensure_admin_command_supported(opcode)?;
         let mut packet = build_protocol_command(
             DataDirection::Write,
             opcode,
@@ -345,6 +375,7 @@ impl NvmeDevice {
         cdw14: u32,
         cdw15: u32,
     ) -> Result<u32, String> {
+        self.ensure_admin_command_supported(opcode)?;
         let mut packet = build_protocol_command(
             DataDirection::None,
             opcode,
@@ -358,6 +389,38 @@ impl NvmeDevice {
 
     pub fn identify_controller(&self) -> Result<[u8; 4096], String> {
         let mut packet = build_identify_query();
+        let returned = self.submit_query(&mut packet, "NVMe identify query")?;
+        extract_identify_response(&packet, returned)
+    }
+
+    fn ensure_admin_command_supported(&self, opcode: u8) -> Result<(), String> {
+        if self.command_effects.borrow().is_none() {
+            let mut packet = build_command_effects_query();
+            let returned = self.submit_query(&mut packet, "NVMe command-effects query")?;
+            let log = extract_protocol_data(
+                &packet,
+                returned,
+                "NVMe command-effects query",
+            )?;
+            *self.command_effects.borrow_mut() = Some(log);
+        }
+
+        let supported = self
+            .command_effects
+            .borrow()
+            .as_ref()
+            .is_some_and(|log| admin_command_supported(log, opcode));
+        if supported {
+            Ok(())
+        } else {
+            Err(format!(
+                "Windows NVMe driver will reject opcode 0x{:02x}: the drive does not mark it supported in Command Effects Log page 0x05",
+                opcode
+            ))
+        }
+    }
+
+    fn submit_query(&self, packet: &mut AlignedBuffer, description: &str) -> Result<u32, String> {
         let mut returned = 0u32;
         let ok = unsafe {
             DeviceIoControl(
@@ -373,12 +436,12 @@ impl NvmeDevice {
         };
         if ok == 0 {
             return Err(format!(
-                "NVMe identify query failed: {}",
+                "{} failed: {}",
+                description,
                 format_windows_error(unsafe { GetLastError() })
             ));
         }
-
-        extract_identify_response(&packet, returned)
+        Ok(returned)
     }
 
     fn submit(&self, packet: &mut AlignedBuffer, opcode: u8) -> Result<(u32, u32), String> {
@@ -528,5 +591,27 @@ mod tests {
         copy_protocol_read_data(&packet, packet.len as u32, 0xC1, &mut output).unwrap();
 
         assert_eq!(output, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn command_effects_log_marks_supported_admin_opcodes() {
+        let mut log = [0u8; COMMAND_EFFECTS_LOG_LEN];
+        log[0xC2 * 4..0xC2 * 4 + 4].copy_from_slice(&1u32.to_le_bytes());
+
+        assert!(admin_command_supported(&log, 0xC2));
+        assert!(!admin_command_supported(&log, 0xD2));
+    }
+
+    #[test]
+    fn command_effects_query_requests_log_page_five() {
+        let packet = build_command_effects_query();
+        let bytes = packet.as_bytes();
+
+        assert_eq!(&bytes[12..16], &NVME_DATA_TYPE_LOG_PAGE.to_le_bytes());
+        assert_eq!(&bytes[16..20], &COMMAND_EFFECTS_LOG_ID.to_le_bytes());
+        assert_eq!(
+            &bytes[28..32],
+            &(COMMAND_EFFECTS_LOG_LEN as u32).to_le_bytes()
+        );
     }
 }
