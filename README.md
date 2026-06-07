@@ -74,7 +74,6 @@ sudo ./target/release/ssd-flash-id --list
 | Phison | PS5012 (E12), PS5016 (E16), PS5018 (E18), PS5019 (E19T), PS5021 (E21T), PS5026 (E26), PS5027 (E27T) |
 | Maxio | MAP1001, MAP1002, MAP1003, MAP1201, MAP1202, MAP1601, MAP1602 |
 | Marvell | 88NV1160, 88NV1140 |
-| Innogrit | IG5208, IG5216, IG5220, IG5236, IG5266 |
 | Tenafe | TC2200, TC2201 |
 
 ### SATA
@@ -180,11 +179,9 @@ Increase the default ten-second command timeout when required:
   `--device-type ata` after confirming the drive type.
 - `drive does not mark it supported in Command Effects Log page 0x05`: the
   Windows NVMe driver will not allow that vendor opcode.
-- `AVSCC.CommandFormatInSpec=0`: the drive uses a proprietary admin-command
-  data format that Microsoft StorNVMe cannot map through its standard
-  pass-through API. The Innogrit implementation automatically tries vendor log
-  page `0xE1`; if the firmware does not expose that log, use Linux or a
-  controller-vendor Windows driver/tool.
+- `AVSCC.CommandFormatInSpec=0`: the controller uses proprietary admin-command
+  transfer fields that Microsoft StorNVMe cannot safely map through its
+  standard pass-through API.
 - `pass-through failed`: the drive, bridge, RAID layer, or storage driver
   rejected the low-level command.
 - `could not auto-detect controller type`: retry with `--no-probe`, or use
@@ -210,7 +207,7 @@ options:
     -l, --list          list NVMe and SATA devices
     --device-type       force physical-drive protocol: nvme or ata
     -c, --controller    force controller type:
-                        nvme: smi, rtl, phison, maxio, marvell, innogrit, tenafe
+                        nvme: smi, rtl, phison, maxio, marvell, tenafe
                         sata: jm, smi-sata, yeestor, sandforce, rtl-sata
     --rtl-variant       force Realtek NVMe variant: v1 or v2
     --raw               dump raw flash ID bytes without decoding
@@ -233,11 +230,26 @@ options:
 - StorNVMe accepts a vendor-specific opcode only when the drive advertises it
   as supported in the NVMe Command Supported and Effects log. The Windows
   transport checks that log before sending each vendor opcode.
-- StorNVMe also requires a command format it can map. Some Innogrit firmware
-  reports `AVSCC.CommandFormatInSpec=0`; the Windows implementation tries the
-  standardized `0xE1` vendor-log fallback before reporting incompatibility.
+- StorNVMe also requires a command format it can map. The Windows transport
+  checks `AVSCC.CommandFormatInSpec` before vendor commands that transfer data.
 - USB bridges, RAID drivers, and vendor storage drivers may block pass-through
   commands.
+
+#### Likely unsupported NVMe devices
+
+Windows compatibility is firmware- and driver-dependent, not just
+controller-family-dependent. A device is likely unsupported when:
+
+- Identify Controller reports `AVSCC.CommandFormatInSpec=0`;
+- its required opcode has `CSUPP=0` in Command Effects Log page `0x05`;
+- it is behind a USB bridge or RAID/VMD layer that blocks protocol commands;
+- its installed storage driver does not implement
+  `IOCTL_STORAGE_PROTOCOL_COMMAND`.
+
+Verified incompatible hardware: Innogrit IG5236 firmware `3.2.F.74` reports
+`AVSCC.CommandFormatInSpec=0`. Innogrit support is therefore not included.
+Other controller families must be evaluated from their actual Identify and
+Command Effects data; model or family names alone are insufficient.
 
 ### Linux
 
