@@ -234,6 +234,43 @@ options:
 - Uses NVMe ioctl and ATA PASS-THROUGH via `SG_IO`.
 - Requires root privileges (`sudo`).
 
+## Windows API References
+
+The Windows implementation follows these Microsoft sources:
+
+### NVMe and storage protocols
+
+- [Working with NVMe drives](https://learn.microsoft.com/en-us/windows/win32/fileio/working-with-nvme-devices)
+- [IOCTL_STORAGE_PROTOCOL_COMMAND](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_protocol_command)
+- [STORAGE_PROTOCOL_COMMAND](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_protocol_command)
+- [NVME_ERROR_INFO_LOG](https://learn.microsoft.com/en-us/windows/win32/api/nvme/ns-nvme-nvme_error_info_log)
+- [IOCTL_STORAGE_QUERY_PROPERTY](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_query_property)
+- [STORAGE_PROPERTY_QUERY](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_property_query)
+- [STORAGE_PROTOCOL_SPECIFIC_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_protocol_specific_data)
+- [STORAGE_PROTOCOL_DATA_DESCRIPTOR](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_protocol_data_descriptor)
+- [STORAGE_PROTOCOL_NVME_DATA_TYPE](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ne-winioctl-storage_protocol_nvme_data_type)
+- [STORAGE_PROPERTY_ID](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ne-winioctl-storage_property_id)
+- [STORAGE_DEVICE_DESCRIPTOR](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_device_descriptor)
+- [STORAGE_BUS_TYPE](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ne-winioctl-storage_bus_type)
+
+### ATA pass-through
+
+- [IOCTL_ATA_PASS_THROUGH](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ni-ntddscsi-ioctl_ata_pass_through)
+- [ATA_PASS_THROUGH_EX](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ns-ntddscsi-_ata_pass_through_ex)
+
+### Device access, enumeration, and errors
+
+- [DeviceIoControl](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-deviceiocontrol)
+- [CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+- [QueryDosDeviceW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-querydosdevicew)
+- [GetCurrentProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocess)
+- [OpenProcessToken](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken)
+- [GetTokenInformation](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation)
+- [TOKEN_ELEVATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-token_elevation)
+- [CloseHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle)
+- [FormatMessageW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-formatmessagew)
+- [GetLastError](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror)
+
 ## Credits
 
 Original project:
