@@ -170,12 +170,17 @@ fn build_protocol_command(
     packet
 }
 
-fn build_protocol_query(data_type: u32, request_value: u32, data_len: usize) -> AlignedBuffer {
+fn build_protocol_query(
+    property_id: u32,
+    data_type: u32,
+    request_value: u32,
+    data_len: usize,
+) -> AlignedBuffer {
     let data_offset = PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN + PROTOCOL_SPECIFIC_DATA_LEN;
     let mut packet = AlignedBuffer::zeroed(data_offset + data_len);
     let bytes = packet.as_mut_bytes();
 
-    bytes[0..4].copy_from_slice(&STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY.to_le_bytes());
+    bytes[0..4].copy_from_slice(&property_id.to_le_bytes());
     bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
     bytes[8..12].copy_from_slice(&PROTOCOL_TYPE_NVME.to_le_bytes());
     bytes[12..16].copy_from_slice(&data_type.to_le_bytes());
@@ -186,14 +191,29 @@ fn build_protocol_query(data_type: u32, request_value: u32, data_len: usize) -> 
 }
 
 fn build_identify_query() -> AlignedBuffer {
-    build_protocol_query(NVME_DATA_TYPE_IDENTIFY, 1, IDENTIFY_DATA_LEN)
+    build_protocol_query(
+        STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY,
+        NVME_DATA_TYPE_IDENTIFY,
+        1,
+        IDENTIFY_DATA_LEN,
+    )
 }
 
 fn build_command_effects_query() -> AlignedBuffer {
     build_protocol_query(
+        STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY,
         NVME_DATA_TYPE_LOG_PAGE,
         COMMAND_EFFECTS_LOG_ID,
         COMMAND_EFFECTS_LOG_LEN,
+    )
+}
+
+fn build_log_page_query(log_id: u8, data_len: usize) -> AlignedBuffer {
+    build_protocol_query(
+        STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY,
+        NVME_DATA_TYPE_LOG_PAGE,
+        log_id as u32,
+        data_len,
     )
 }
 
@@ -454,6 +474,17 @@ impl NvmeDevice {
         extract_identify_response(&packet, returned)
     }
 
+    pub fn get_log_page<const N: usize>(&self, log_id: u8) -> Result<[u8; N], String> {
+        let mut packet = build_log_page_query(log_id, N);
+        let description = format!("NVMe log page 0x{log_id:02x} query");
+        let returned = self.submit_query(&mut packet, &description)?;
+        extract_protocol_data(&packet, returned, &description)
+    }
+
+    pub fn standard_admin_vendor_format_supported(&self) -> Result<bool, String> {
+        self.identify_controller().map(|data| data[264] & 1 != 0)
+    }
+
     fn ensure_admin_command_supported(&self, opcode: u8) -> Result<(), String> {
         if self.command_effects.borrow().is_none() {
             let mut packet = build_command_effects_query();
@@ -702,12 +733,30 @@ mod tests {
         let packet = build_command_effects_query();
         let bytes = packet.as_bytes();
 
+        assert_eq!(
+            &bytes[0..4],
+            &STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY.to_le_bytes()
+        );
         assert_eq!(&bytes[12..16], &NVME_DATA_TYPE_LOG_PAGE.to_le_bytes());
         assert_eq!(&bytes[16..20], &COMMAND_EFFECTS_LOG_ID.to_le_bytes());
         assert_eq!(
             &bytes[28..32],
             &(COMMAND_EFFECTS_LOG_LEN as u32).to_le_bytes()
         );
+    }
+
+    #[test]
+    fn vendor_log_query_requests_selected_page() {
+        let packet = build_log_page_query(0xE1, 512);
+        let bytes = packet.as_bytes();
+
+        assert_eq!(
+            &bytes[0..4],
+            &STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY.to_le_bytes()
+        );
+        assert_eq!(&bytes[12..16], &NVME_DATA_TYPE_LOG_PAGE.to_le_bytes());
+        assert_eq!(&bytes[16..20], &0xE1u32.to_le_bytes());
+        assert_eq!(&bytes[28..32], &512u32.to_le_bytes());
     }
 
     #[test]

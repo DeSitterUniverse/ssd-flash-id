@@ -162,6 +162,26 @@ impl NvmeDevice {
         Ok(buf)
     }
 
+    pub fn get_log_page<const N: usize>(&self, log_id: u8) -> Result<[u8; N], String> {
+        if N == 0 || N % 4 != 0 {
+            return Err("NVMe log page length must be a non-zero multiple of four".to_string());
+        }
+        let mut buf = [0u8; N];
+        let number_of_dwords = (N / 4 - 1) as u32;
+        self.admin_read(
+            0x02,
+            u32::MAX,
+            (number_of_dwords << 16) | log_id as u32,
+            0,
+            0,
+            0,
+            0,
+            0,
+            &mut buf,
+        )?;
+        Ok(buf)
+    }
+
     fn submit_admin_cmd(&self, cmd: &mut NvmeAdminCmd) -> Result<u32, String> {
         let ret = unsafe { libc::ioctl(self.fd, NVME_IOCTL_ADMIN_CMD, cmd as *mut NvmeAdminCmd) };
         if ret < 0 {
