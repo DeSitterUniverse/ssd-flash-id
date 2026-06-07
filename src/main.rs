@@ -58,6 +58,15 @@ enum DeviceKind {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SataAutoStrategy {
+    Smi,
+    Realtek,
+    IdentifyData,
+    Probe,
+    Unsupported,
+}
+
 fn parse_args() -> Args {
     let mut args = Args {
         device: None,
@@ -535,6 +544,13 @@ fn print_banks(result: &FlashIdResult, raw: bool) {
 }
 
 fn run_nvme(dev_path: &str, args: &Args) {
+    if let Some(forced) = args.controller.as_deref() {
+        eprintln!(
+            "warning: forcing controller '{}' sends vendor-specific commands without auto-detection",
+            forced
+        );
+    }
+
     let dev = match NvmeDevice::open_with_timeout(dev_path, args.timeout_seconds) {
         Ok(d) => d,
         Err(e) => {
@@ -623,6 +639,26 @@ fn run_nvme(dev_path: &str, args: &Args) {
     }
 }
 
+fn sata_auto_strategy(
+    firmware: &str,
+    has_identify_fid: bool,
+    no_probe: bool,
+) -> SataAutoStrategy {
+    if controllers::smi_sata::detect_from_firmware(firmware).is_some() {
+        SataAutoStrategy::Smi
+    } else if controllers::rtl_sata::detect_from_firmware(firmware).is_some() {
+        SataAutoStrategy::Realtek
+    } else if no_probe {
+        if has_identify_fid {
+            SataAutoStrategy::IdentifyData
+        } else {
+            SataAutoStrategy::Unsupported
+        }
+    } else {
+        SataAutoStrategy::Probe
+    }
+}
+
 fn run_sata(dev_path: &str, args: &Args) {
     let forced = args.controller.as_deref();
     const SATA_TYPES: &[&str] = &["jm", "smi-sata", "yeestor", "sandforce", "rtl-sata"];
@@ -635,6 +671,12 @@ fn run_sata(dev_path: &str, args: &Args) {
             SATA_TYPES.join(", ")
         );
         std::process::exit(1);
+    }
+    if let Some(forced) = forced {
+        eprintln!(
+            "warning: forcing controller '{}' sends vendor-specific commands without auto-detection",
+            forced
+        );
     }
 
     let dev = match AtaDevice::open_with_timeout(dev_path, args.timeout_seconds) {
@@ -669,24 +711,31 @@ fn run_sata(dev_path: &str, args: &Args) {
     } else if forced == Some("rtl-sata") {
         try_rtl_sata(&dev)
     } else {
-        // Auto-detect: check firmware strings first
-        if controllers::smi_sata::detect_from_firmware(&info.firmware).is_some() {
-            try_smi_sata(&dev)
-        } else if controllers::rtl_sata::detect_from_firmware(&info.firmware).is_some() {
-            try_rtl_sata(&dev)
-        } else {
-            // Try each controller family in order of least-invasive
-            try_yeestor(&dev)
-                .or_else(|_| try_smi_sata(&dev))
-                .or_else(|_| try_sandforce(&dev))
-                .or_else(|_| try_jm_sata(&dev))
-                .or_else(|_| try_rtl_sata(&dev))
-                .or_else(|_| {
-                    // Last resort: check if flash ID was embedded in ATA IDENTIFY data
-                    identify_fid.clone().map(|r| (r, "SATA")).ok_or_else(|| {
-                        "no vendor commands succeeded and no flash ID in IDENTIFY data".to_string()
+        match sata_auto_strategy(&info.firmware, identify_fid.is_some(), args.no_probe) {
+            SataAutoStrategy::Smi => try_smi_sata(&dev),
+            SataAutoStrategy::Realtek => try_rtl_sata(&dev),
+            SataAutoStrategy::IdentifyData => {
+                Ok((identify_fid.expect("strategy checked flash ID"), "SATA"))
+            }
+            SataAutoStrategy::Probe => {
+                // Try each controller family in order of least-invasive.
+                // The IDENTIFY-data fallback was already checked by the strategy.
+                try_yeestor(&dev)
+                    .or_else(|_| try_smi_sata(&dev))
+                    .or_else(|_| try_sandforce(&dev))
+                    .or_else(|_| try_jm_sata(&dev))
+                    .or_else(|_| try_rtl_sata(&dev))
+                    .or_else(|_| {
+                        identify_fid.clone().map(|r| (r, "SATA")).ok_or_else(|| {
+                            "no vendor commands succeeded and no flash ID in IDENTIFY data"
+                                .to_string()
+                        })
                     })
-                })
+            }
+            SataAutoStrategy::Unsupported => Err(
+                "controller was not identified from SATA metadata and --no-probe prevents vendor-family probing"
+                    .to_string(),
+            ),
         }
     };
 
@@ -733,6 +782,27 @@ fn try_sandforce(dev: &AtaDevice) -> Result<(FlashIdResult, &'static str), Strin
 fn try_rtl_sata(dev: &AtaDevice) -> Result<(FlashIdResult, &'static str), String> {
     let result = controllers::rtl_sata::read_flash_id(dev)?;
     Ok((result, "Realtek"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sata_no_probe_never_selects_vendor_family_probing() {
+        assert_eq!(
+            sata_auto_strategy("unknown", false, true),
+            SataAutoStrategy::Unsupported
+        );
+        assert_eq!(
+            sata_auto_strategy("unknown", true, true),
+            SataAutoStrategy::IdentifyData
+        );
+        assert_eq!(
+            sata_auto_strategy("unknown", false, false),
+            SataAutoStrategy::Probe
+        );
+    }
 }
 
 fn main() {

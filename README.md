@@ -115,6 +115,9 @@ devices require an explicit path:
 - Windows: `ssd-flash-id.exe \\.\PhysicalDrive0`
 - Linux: `ssd-flash-id /dev/sda`
 
+`--no-probe` prevents controller-family probing on both NVMe and SATA. A forced
+`--controller` selection prints a warning because it bypasses auto-detection.
+
 ## Platform Notes
 
 ### Windows
