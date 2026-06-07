@@ -100,6 +100,7 @@ ssd-flash-id [options] [device]
 
 options:
     -l, --list          list NVMe and SATA devices
+    --device-type       force physical-drive protocol: nvme or ata
     -c, --controller    force controller type:
                         nvme: smi, rtl, phison, maxio, marvell, innogrit, tenafe
                         sata: jm, smi-sata, yeestor, sandforce, rtl-sata
