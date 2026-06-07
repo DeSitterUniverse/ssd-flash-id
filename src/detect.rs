@@ -82,7 +82,10 @@ fn detect_realtek(fw: &str, vid: u16, ssvid: u16) -> Option<ControllerType> {
         }
     }
     if vid == RTL_VID || ssvid == RTL_VID {
-        return Some(ControllerType::Realtek("Realtek (by VID)".into(), RtlVariant::V1));
+        return Some(ControllerType::Realtek(
+            "Realtek (by VID)".into(),
+            RtlVariant::V1,
+        ));
     }
     None
 }
@@ -111,9 +114,7 @@ fn detect_tenafe(model: &str) -> Option<ControllerType> {
 
 fn probe_phison(dev: &NvmeDevice) -> Option<ControllerType> {
     let mut buf = [0u8; 4096];
-    if dev
-        .admin_read(0xD2, 0, 0, 0, 0, 0, 0, 0, &mut buf)
-        .is_ok()
+    if dev.admin_read(0xD2, 0, 0, 0, 0, 0, 0, 0, &mut buf).is_ok()
         && buf.windows(8).any(|w| w == b"PhIsOnNo")
     {
         return Some(ControllerType::Phison("Phison".to_string()));
@@ -175,8 +176,7 @@ fn probe_innogrit(dev: &NvmeDevice) -> Option<ControllerType> {
     None
 }
 
-pub fn detect(dev: &NvmeDevice, info: &crate::nvme::ControllerInfo) -> Option<ControllerType> {
-    // Firmware/model/VID-based detection (no vendor commands)
+pub fn detect_metadata(info: &crate::nvme::ControllerInfo) -> Option<ControllerType> {
     if let Some(ct) = detect_realtek(&info.firmware, info.vid, info.ssvid) {
         return Some(ct);
     }
@@ -184,6 +184,21 @@ pub fn detect(dev: &NvmeDevice, info: &crate::nvme::ControllerInfo) -> Option<Co
         return Some(ct);
     }
     if let Some(ct) = detect_tenafe(&info.model) {
+        return Some(ct);
+    }
+
+    if info.vid == PHISON_VID || info.ssvid == PHISON_VID {
+        return Some(ControllerType::Phison("Phison (by VID)".into()));
+    }
+    if info.vid == MAXIO_VID || info.ssvid == MAXIO_VID {
+        return Some(ControllerType::Maxio("Maxio (by VID)".into()));
+    }
+
+    None
+}
+
+pub fn detect(dev: &NvmeDevice, info: &crate::nvme::ControllerInfo) -> Option<ControllerType> {
+    if let Some(ct) = detect_metadata(info) {
         return Some(ct);
     }
 
@@ -201,13 +216,26 @@ pub fn detect(dev: &NvmeDevice, info: &crate::nvme::ControllerInfo) -> Option<Co
         return Some(ct);
     }
 
-    // VID fallback for controllers whose probes might not respond on all variants
-    if info.vid == PHISON_VID || info.ssvid == PHISON_VID {
-        return Some(ControllerType::Phison("Phison (by VID)".into()));
-    }
-    if info.vid == MAXIO_VID || info.ssvid == MAXIO_VID {
-        return Some(ControllerType::Maxio("Maxio (by VID)".into()));
-    }
-
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_only_detection_uses_vid_without_probing() {
+        let info = crate::nvme::ControllerInfo {
+            vid: PHISON_VID,
+            ssvid: 0,
+            serial: String::new(),
+            model: "Unknown".into(),
+            firmware: "Unknown".into(),
+        };
+
+        assert!(matches!(
+            detect_metadata(&info),
+            Some(ControllerType::Phison(_))
+        ));
+    }
 }

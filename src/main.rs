@@ -35,21 +35,34 @@ use crate::nvme::{NvmeDevice, parse_identify};
 
 struct Args {
     device: Option<String>,
+    device_type: Option<DeviceKind>,
     controller: Option<String>,
     rtl_variant: Option<RtlVariant>,
     help: bool,
     list: bool,
     raw: bool,
+    no_probe: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceKind {
+    Nvme,
+    Ata,
+    #[cfg(windows)]
+    Ambiguous,
+    Unknown,
 }
 
 fn parse_args() -> Args {
     let mut args = Args {
         device: None,
+        device_type: None,
         controller: None,
         rtl_variant: None,
         help: false,
         list: false,
         raw: false,
+        no_probe: false,
     };
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -59,6 +72,26 @@ fn parse_args() -> Args {
             "--help" | "-h" => args.help = true,
             "--list" | "-l" => args.list = true,
             "--raw" => args.raw = true,
+            "--no-probe" => args.no_probe = true,
+            "--device-type" => {
+                i += 1;
+                if i < argv.len() {
+                    args.device_type = match argv[i].as_str() {
+                        "nvme" => Some(DeviceKind::Nvme),
+                        "ata" | "sata" => Some(DeviceKind::Ata),
+                        other => {
+                            eprintln!(
+                                "error: unknown device type '{}' (expected nvme or ata)",
+                                other
+                            );
+                            std::process::exit(1);
+                        }
+                    };
+                } else {
+                    eprintln!("error: --device-type requires a value");
+                    std::process::exit(1);
+                }
+            }
             "--controller" | "-c" => {
                 i += 1;
                 if i < argv.len() {
@@ -116,11 +149,13 @@ arguments:
 options:
     -h, --help          show this help
     -l, --list          list NVMe and SATA devices
+    --device-type       force physical-drive protocol: nvme or ata
     -c, --controller    force controller type:
                         nvme: smi, rtl, phison, maxio, marvell, innogrit, tenafe
                         sata: jm, smi-sata, yeestor, sandforce, rtl-sata
     --rtl-variant       force Realtek variant: v1 (RTS5762/63), v2 (RTS5765/66/72)
-    --raw               dump raw flash ID bytes as hex"
+    --raw               dump raw flash ID bytes as hex
+    --no-probe          detect from identity metadata only"
     );
 }
 
@@ -177,7 +212,7 @@ fn find_nvme_devices() -> Vec<String> {
 fn find_nvme_devices() -> Vec<String> {
     enumerate_physical_drives()
         .into_iter()
-        .filter(|path| storage_bus_type(path) == Some(BUS_TYPE_NVME))
+        .filter(|path| device_kind_from_bus(storage_bus_type(path)) == DeviceKind::Nvme)
         .collect()
 }
 
@@ -214,38 +249,39 @@ fn find_sata_devices() -> Vec<String> {
 fn find_sata_devices() -> Vec<String> {
     enumerate_physical_drives()
         .into_iter()
-        .filter(|path| {
-            matches!(
-                storage_bus_type(path),
-                Some(BUS_TYPE_ATA) | Some(BUS_TYPE_USB) | Some(BUS_TYPE_SATA)
-            )
-        })
+        .filter(|path| device_kind_from_bus(storage_bus_type(path)) == DeviceKind::Ata)
         .collect()
 }
 
 #[cfg(target_os = "linux")]
-fn is_sata_path(path: &str) -> bool {
+fn device_kind(path: &str) -> DeviceKind {
     let name = std::path::Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
     if name.starts_with("sd") {
-        return true;
+        return DeviceKind::Ata;
     }
     if name.starts_with("nvme") {
-        return false;
+        return DeviceKind::Nvme;
     }
     // Unknown name pattern: check if block device (SATA) vs char device (NVMe)
     if let Ok(meta) = std::fs::metadata(path) {
-        meta.file_type().is_block_device()
+        if meta.file_type().is_block_device() {
+            DeviceKind::Ata
+        } else if meta.file_type().is_char_device() {
+            DeviceKind::Nvme
+        } else {
+            DeviceKind::Unknown
+        }
     } else {
-        false
+        DeviceKind::Unknown
     }
 }
 
 #[cfg(windows)]
-fn is_sata_path(path: &str) -> bool {
-    storage_bus_type(path) != Some(BUS_TYPE_NVME)
+fn device_kind(path: &str) -> DeviceKind {
+    device_kind_from_bus(storage_bus_type(path))
 }
 
 #[cfg(windows)]
@@ -255,9 +291,21 @@ const BUS_TYPE_ATA: u32 = 3;
 #[cfg(windows)]
 const BUS_TYPE_USB: u32 = 7;
 #[cfg(windows)]
+const BUS_TYPE_RAID: u32 = 8;
+#[cfg(windows)]
 const BUS_TYPE_SATA: u32 = 11;
 #[cfg(windows)]
 const BUS_TYPE_NVME: u32 = 17;
+
+#[cfg(windows)]
+fn device_kind_from_bus(bus_type: Option<u32>) -> DeviceKind {
+    match bus_type {
+        Some(BUS_TYPE_NVME) => DeviceKind::Nvme,
+        Some(BUS_TYPE_ATA) | Some(BUS_TYPE_SATA) => DeviceKind::Ata,
+        Some(BUS_TYPE_USB) | Some(BUS_TYPE_RAID) => DeviceKind::Ambiguous,
+        _ => DeviceKind::Unknown,
+    }
+}
 
 #[cfg(windows)]
 fn is_process_elevated() -> bool {
@@ -487,7 +535,12 @@ fn run_nvme(dev_path: &str, args: &Args) {
             }
         }
     } else {
-        match detect::detect(&dev, &info) {
+        let detected = if args.no_probe {
+            detect::detect_metadata(&info)
+        } else {
+            detect::detect(&dev, &info)
+        };
+        match detected {
             Some(ct) => ct,
             None => {
                 eprintln!(
@@ -696,10 +749,26 @@ fn main() {
         }
     };
 
-    if is_sata_path(&dev_path) {
-        run_sata(&dev_path, &args);
-    } else {
-        run_nvme(&dev_path, &args);
+    match args.device_type.unwrap_or_else(|| device_kind(&dev_path)) {
+        DeviceKind::Ata => run_sata(&dev_path, &args),
+        DeviceKind::Nvme => run_nvme(&dev_path, &args),
+        #[cfg(windows)]
+        DeviceKind::Ambiguous => {
+            eprintln!(
+                "error: '{}' uses an ambiguous USB or RAID transport\n\n\
+                 specify --device-type nvme or --device-type ata",
+                dev_path
+            );
+            std::process::exit(1);
+        }
+        DeviceKind::Unknown => {
+            eprintln!(
+                "error: could not determine the storage protocol for '{}'\n\n\
+                 specify --device-type nvme or --device-type ata",
+                dev_path
+            );
+            std::process::exit(1);
+        }
     }
 }
 
@@ -725,5 +794,21 @@ mod windows_tests {
                 r"\\.\PhysicalDrive10",
             ]
         );
+    }
+
+    #[test]
+    fn classifies_windows_storage_bus_types_without_guessing() {
+        assert_eq!(device_kind_from_bus(Some(BUS_TYPE_NVME)), DeviceKind::Nvme);
+        assert_eq!(device_kind_from_bus(Some(BUS_TYPE_ATA)), DeviceKind::Ata);
+        assert_eq!(device_kind_from_bus(Some(BUS_TYPE_SATA)), DeviceKind::Ata);
+        assert_eq!(
+            device_kind_from_bus(Some(BUS_TYPE_USB)),
+            DeviceKind::Ambiguous
+        );
+        assert_eq!(
+            device_kind_from_bus(Some(BUS_TYPE_RAID)),
+            DeviceKind::Ambiguous
+        );
+        assert_eq!(device_kind_from_bus(None), DeviceKind::Unknown);
     }
 }
