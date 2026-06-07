@@ -99,6 +99,11 @@ fn parse_args() -> Args {
 }
 
 fn print_usage() {
+    let device_help = if cfg!(windows) {
+        r"physical drive path (e.g. \\.\PhysicalDrive0)"
+    } else {
+        "device path (e.g. /dev/nvme0, /dev/sda)"
+    };
     println!(
         "\
 ssd-flash-id - Identify NAND flash chips on NVMe and SATA SSDs
@@ -106,7 +111,7 @@ ssd-flash-id - Identify NAND flash chips on NVMe and SATA SSDs
 usage: ssd-flash-id [options] [device]
 
 arguments:
-    device              device path (e.g. /dev/nvme0, /dev/sda)
+    device              {device_help}
 
 options:
     -h, --help          show this help
@@ -670,7 +675,13 @@ fn main() {
             let devices = find_nvme_devices();
             if devices.is_empty() {
                 eprintln!("error: no NVMe devices found");
-                eprintln!("\nfor SATA devices, specify the path: ssd-flash-id /dev/sdX");
+                if cfg!(windows) {
+                    eprintln!(
+                        "\nfor SATA devices, specify the path: ssd-flash-id \\\\.\\PhysicalDriveN"
+                    );
+                } else {
+                    eprintln!("\nfor SATA devices, specify the path: ssd-flash-id /dev/sdX");
+                }
                 std::process::exit(1);
             }
             if devices.len() > 1 {

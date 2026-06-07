@@ -1,9 +1,14 @@
 # ssd-flash-id
 
-Linux open-source equivalent of [VLO's SSD Flash ID tools](http://vlo.name:3000/ssdtool/).
-Identifies NAND flash chips on NVMe and SATA SSDs via vendor-specific commands,
-reporting flash type (QLC/TLC/MLC/SLC), manufacturer, and technology node
-for each NAND bank on the drive.
+Windows port of
+[pseudolabel/ssd-flash-id](https://github.com/pseudolabel/ssd-flash-id), the
+Linux open-source equivalent of
+[VLO's SSD Flash ID tools](http://vlo.name:3000/ssdtool/). It identifies NAND
+flash chips on NVMe and SATA SSDs via vendor-specific commands, reporting flash
+type (QLC/TLC/MLC/SLC), manufacturer, and technology node for each NAND bank.
+
+The Windows port retains the original Linux implementation and controller
+support.
 
 ```
 $ sudo ssd-flash-id /dev/nvme0
@@ -17,17 +22,45 @@ Bank02: 0x89,0xd3,0xac,0x32,0xc6,0x00,0x00,0x00 - Intel 144L(N38A) QLC
 Bank03: 0x89,0xd3,0xac,0x32,0xc6,0x00,0x00,0x00 - Intel 144L(N38A) QLC
 ```
 
-## Install
+## Build
+
+### Windows
+
+Requirements:
+
+- Windows 10 or later
+- Rust stable with the MSVC toolchain
+- An Administrator PowerShell or Command Prompt for accessing physical drives
+
+Build the `windows-port` branch:
+
+```
+git clone https://github.com/DeSitterUniverse/ssd-flash-id.git
+cd ssd-flash-id
+git switch windows-port
+cargo build --release
+```
+
+Run from an elevated terminal:
+
+```
+.\target\release\ssd-flash-id.exe --list
+.\target\release\ssd-flash-id.exe \\.\PhysicalDrive0
+```
+
+### Linux
+
+Install the upstream crate:
 
 ```
 cargo install ssd-flash-id
 ```
 
-Or build from source:
+Or build this branch from source:
 
 ```
 cargo build --release
-sudo ./target/release/ssd-flash-id
+sudo ./target/release/ssd-flash-id --list
 ```
 
 ## Supported Controllers
@@ -74,17 +107,37 @@ options:
     --raw               dump raw flash ID bytes without decoding
 ```
 
-Auto-detects the controller type. NVMe devices are found automatically; SATA
-devices require an explicit path (e.g. `ssd-flash-id /dev/sda`).
+Auto-detects the controller type. NVMe devices are found automatically. SATA
+devices require an explicit path:
 
-## Requirements
+- Windows: `ssd-flash-id.exe \\.\PhysicalDrive0`
+- Linux: `ssd-flash-id /dev/sda`
 
-- Linux (uses NVMe ioctl and ATA PASS-THROUGH via SG_IO directly, no external dependencies)
-- Root privileges (`sudo`)
+## Platform Notes
+
+### Windows
+
+- Uses `IOCTL_STORAGE_PROTOCOL_COMMAND` for NVMe vendor commands.
+- Uses `IOCTL_ATA_PASS_THROUGH` for SATA commands.
+- Requires Administrator privileges.
+- StorNVMe accepts a vendor-specific opcode only when the drive advertises it
+  as supported in the NVMe Command Supported and Effects log. A drive may
+  therefore accept a command on Linux but reject it on Windows.
+- USB bridges, RAID drivers, and vendor storage drivers may block pass-through
+  commands.
+
+### Linux
+
+- Uses NVMe ioctl and ATA PASS-THROUGH via `SG_IO`.
+- Requires root privileges (`sudo`).
 
 ## Credits
 
-Based on the vendor-specific command research from [VLO's SSD tools](http://vlo.name:3000/ssdtool/) (Windows).
+Original project:
+[pseudolabel/ssd-flash-id](https://github.com/pseudolabel/ssd-flash-id).
+
+Controller command support is based on the vendor-specific command research
+from [VLO's SSD tools](http://vlo.name:3000/ssdtool/) for Windows.
 
 ## License
 
