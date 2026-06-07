@@ -7,6 +7,11 @@ mod imp;
 
 pub use imp::NvmeDevice;
 
+#[cfg(windows)]
+pub fn admin_vendor_command_format_in_spec(data: &[u8; 4096]) -> bool {
+    data[264] & 1 != 0
+}
+
 pub struct ControllerInfo {
     pub vid: u16,
     pub ssvid: u16,

@@ -13,6 +13,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
+use super::admin_vendor_command_format_in_spec;
 use crate::windows::format_windows_error;
 
 const IOCTL_STORAGE_PROTOCOL_COMMAND: u32 = 0x002D_D3C0;
@@ -208,15 +209,6 @@ fn build_command_effects_query() -> AlignedBuffer {
     )
 }
 
-fn build_log_page_query(log_id: u8, data_len: usize) -> AlignedBuffer {
-    build_protocol_query(
-        STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY,
-        NVME_DATA_TYPE_LOG_PAGE,
-        log_id as u32,
-        data_len,
-    )
-}
-
 fn admin_command_supported(log: &[u8; COMMAND_EFFECTS_LOG_LEN], opcode: u8) -> bool {
     let offset = opcode as usize * size_of::<u32>();
     u32::from_le_bytes(log[offset..offset + 4].try_into().unwrap()) & 1 != 0
@@ -313,6 +305,7 @@ pub struct NvmeDevice {
     adapter_handle: Option<HANDLE>,
     timeout_seconds: u32,
     command_effects: RefCell<Option<[u8; COMMAND_EFFECTS_LOG_LEN]>>,
+    standard_admin_vendor_format: RefCell<Option<bool>>,
 }
 
 fn open_handle(path: &str) -> Result<HANDLE, String> {
@@ -391,6 +384,7 @@ impl NvmeDevice {
             adapter_handle,
             timeout_seconds,
             command_effects: RefCell::new(None),
+            standard_admin_vendor_format: RefCell::new(None),
         })
     }
 
@@ -406,6 +400,7 @@ impl NvmeDevice {
         cdw15: u32,
         buf: &mut [u8],
     ) -> Result<u32, String> {
+        self.ensure_admin_vendor_data_format(opcode)?;
         self.ensure_admin_command_supported(opcode)?;
         let mut packet = build_protocol_command(
             DataDirection::Read,
@@ -431,6 +426,7 @@ impl NvmeDevice {
         cdw15: u32,
         buf: &[u8],
     ) -> Result<u32, String> {
+        self.ensure_admin_vendor_data_format(opcode)?;
         self.ensure_admin_command_supported(opcode)?;
         let mut packet = build_protocol_command(
             DataDirection::Write,
@@ -474,15 +470,26 @@ impl NvmeDevice {
         extract_identify_response(&packet, returned)
     }
 
-    pub fn get_log_page<const N: usize>(&self, log_id: u8) -> Result<[u8; N], String> {
-        let mut packet = build_log_page_query(log_id, N);
-        let description = format!("NVMe log page 0x{log_id:02x} query");
-        let returned = self.submit_query(&mut packet, &description)?;
-        extract_protocol_data(&packet, returned, &description)
-    }
-
-    pub fn standard_admin_vendor_format_supported(&self) -> Result<bool, String> {
-        self.identify_controller().map(|data| data[264] & 1 != 0)
+    fn ensure_admin_vendor_data_format(&self, opcode: u8) -> Result<(), String> {
+        if opcode < 0xC0 {
+            return Ok(());
+        }
+        if self.standard_admin_vendor_format.borrow().is_none() {
+            let identify = self.identify_controller()?;
+            *self.standard_admin_vendor_format.borrow_mut() =
+                Some(admin_vendor_command_format_in_spec(&identify));
+        }
+        if self
+            .standard_admin_vendor_format
+            .borrow()
+            .is_some_and(|supported| supported)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "Windows StorNVMe cannot safely map data for admin vendor opcode 0x{opcode:02x}: the controller reports AVSCC.CommandFormatInSpec=0 (vendor-specific command format)"
+            ))
+        }
     }
 
     fn ensure_admin_command_supported(&self, opcode: u8) -> Result<(), String> {
@@ -570,10 +577,11 @@ impl NvmeDevice {
                     return validate_protocol_response(packet, returned, opcode)
                         .map(|result| (result, returned));
                 }
+                let adapter_error = unsafe { GetLastError() };
                 return Err(format!(
                     "NVMe pass-through failed on both the physical drive and storage adapter: {}; adapter retry: {} (opcode 0x{:02x})",
                     format_windows_error(error),
-                    format_windows_error(unsafe { GetLastError() }),
+                    format_windows_error(adapter_error),
                     opcode
                 ));
             }
@@ -746,17 +754,13 @@ mod tests {
     }
 
     #[test]
-    fn vendor_log_query_requests_selected_page() {
-        let packet = build_log_page_query(0xE1, 512);
-        let bytes = packet.as_bytes();
+    fn proprietary_admin_vendor_format_rejects_data_transfer() {
+        let mut identify = [0u8; IDENTIFY_DATA_LEN];
+        identify[264] = 0;
+        assert!(!admin_vendor_command_format_in_spec(&identify));
 
-        assert_eq!(
-            &bytes[0..4],
-            &STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY.to_le_bytes()
-        );
-        assert_eq!(&bytes[12..16], &NVME_DATA_TYPE_LOG_PAGE.to_le_bytes());
-        assert_eq!(&bytes[16..20], &0xE1u32.to_le_bytes());
-        assert_eq!(&bytes[28..32], &512u32.to_le_bytes());
+        identify[264] = 1;
+        assert!(admin_vendor_command_format_in_spec(&identify));
     }
 
     #[test]
@@ -779,7 +783,7 @@ mod tests {
     fn protocol_header_length_matches_windows_sdk_structure() {
         let packet = build_protocol_command(
             DataDirection::None,
-            0xF2,
+            0xC1,
             0,
             [0; 6],
             0,

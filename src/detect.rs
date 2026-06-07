@@ -13,7 +13,6 @@ pub enum ControllerType {
     Phison(String),
     Maxio(String),
     Marvell(String),
-    Innogrit(String),
     Tenafe(String),
 }
 
@@ -25,7 +24,6 @@ impl ControllerType {
             | ControllerType::Phison(n)
             | ControllerType::Maxio(n)
             | ControllerType::Marvell(n)
-            | ControllerType::Innogrit(n)
             | ControllerType::Tenafe(n) => n,
         }
     }
@@ -37,7 +35,6 @@ impl ControllerType {
             ControllerType::Phison(_) => "phison",
             ControllerType::Maxio(_) => "maxio",
             ControllerType::Marvell(_) => "marvell",
-            ControllerType::Innogrit(_) => "innogrit",
             ControllerType::Tenafe(_) => "tenafe",
         }
     }
@@ -74,7 +71,6 @@ const SMI_VID: u16 = 0x2646;
 const RTL_VID: u16 = 0x10EC;
 const PHISON_VID: u16 = 0x1987;
 const MAXIO_VID: u16 = 0x1E4B;
-const INNOGRIT_VID: u16 = 0x1DBE;
 
 fn detect_realtek(fw: &str, vid: u16, ssvid: u16) -> Option<ControllerType> {
     for &(prefix, name, variant) in RTL_FW_PREFIXES {
@@ -154,29 +150,6 @@ fn probe_marvell(dev: &NvmeDevice) -> Option<ControllerType> {
     None
 }
 
-fn probe_innogrit(dev: &NvmeDevice) -> Option<ControllerType> {
-    let mut buf = [0u8; 4096];
-    if dev
-        .admin_read(0xF2, 0, 0, 0, 0, 0, 0x54495247, 0x4F4E4E49, &mut buf)
-        .is_ok()
-        && buf.iter().any(|&b| b != 0)
-    {
-        let did_offset = 0x62E;
-        let name = if did_offset + 2 <= buf.len() {
-            let did = u16::from_le_bytes([buf[did_offset], buf[did_offset + 1]]);
-            if did != 0 {
-                format!("Innogrit (DID 0x{did:04X})")
-            } else {
-                "Innogrit".to_string()
-            }
-        } else {
-            "Innogrit".to_string()
-        };
-        return Some(ControllerType::Innogrit(name));
-    }
-    None
-}
-
 pub fn detect_metadata(info: &crate::nvme::ControllerInfo) -> Option<ControllerType> {
     if let Some(ct) = detect_realtek(&info.firmware, info.vid, info.ssvid) {
         return Some(ct);
@@ -194,10 +167,6 @@ pub fn detect_metadata(info: &crate::nvme::ControllerInfo) -> Option<ControllerT
     if info.vid == MAXIO_VID || info.ssvid == MAXIO_VID {
         return Some(ControllerType::Maxio("Maxio (by VID)".into()));
     }
-    if info.vid == INNOGRIT_VID || info.ssvid == INNOGRIT_VID {
-        return Some(ControllerType::Innogrit("Innogrit (by VID)".into()));
-    }
-
     None
 }
 
@@ -216,10 +185,6 @@ pub fn detect(dev: &NvmeDevice, info: &crate::nvme::ControllerInfo) -> Option<Co
     if let Some(ct) = probe_marvell(dev) {
         return Some(ct);
     }
-    if let Some(ct) = probe_innogrit(dev) {
-        return Some(ct);
-    }
-
     None
 }
 
@@ -240,22 +205,6 @@ mod tests {
         assert!(matches!(
             detect_metadata(&info),
             Some(ControllerType::Phison(_))
-        ));
-    }
-
-    #[test]
-    fn metadata_only_detection_recognizes_innogrit_vid() {
-        let info = crate::nvme::ControllerInfo {
-            vid: 0x1DBE,
-            ssvid: 0x5236,
-            serial: String::new(),
-            model: "XPG GAMMIX S70 BLADE".into(),
-            firmware: "3.2.F.74".into(),
-        };
-
-        assert!(matches!(
-            detect_metadata(&info),
-            Some(ControllerType::Innogrit(_))
         ));
     }
 }

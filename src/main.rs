@@ -188,7 +188,7 @@ options:
     -l, --list          list NVMe and SATA devices
     --device-type       force physical-drive protocol: nvme or ata
     -c, --controller    force controller type:
-                        nvme: smi, rtl, phison, maxio, marvell, innogrit, tenafe
+                        nvme: smi, rtl, phison, maxio, marvell, tenafe
                         sata: jm, smi-sata, yeestor, sandforce, rtl-sata
     --rtl-variant       force Realtek variant: v1 (RTS5762/63), v2 (RTS5765/66/72)
     --raw               dump raw flash ID bytes as hex
@@ -496,7 +496,6 @@ fn resolve_nvme_controller_type(name: &str) -> Option<ControllerType> {
         "phison" => Some(ControllerType::Phison("Phison (forced)".into())),
         "maxio" => Some(ControllerType::Maxio("Maxio (forced)".into())),
         "marvell" => Some(ControllerType::Marvell("Marvell (forced)".into())),
-        "innogrit" => Some(ControllerType::Innogrit("Innogrit (forced)".into())),
         "tenafe" => Some(ControllerType::Tenafe("Tenafe (forced)".into())),
         _ => None,
     }
@@ -509,7 +508,6 @@ fn controller_family_display(ct: &ControllerType) -> &str {
         ControllerType::Phison(_) => "Phison",
         ControllerType::Maxio(_) => "Maxio",
         ControllerType::Marvell(_) => "Marvell",
-        ControllerType::Innogrit(_) => "Innogrit",
         ControllerType::Tenafe(_) => "Tenafe",
     }
 }
@@ -521,7 +519,6 @@ fn nvme_read_flash_id(dev: &NvmeDevice, ct: &ControllerType) -> Result<FlashIdRe
         ControllerType::Phison(_) => controllers::phison::read_flash_id(dev),
         ControllerType::Maxio(_) => controllers::maxio::read_flash_id(dev),
         ControllerType::Marvell(_) => controllers::marvell::read_flash_id(dev),
-        ControllerType::Innogrit(_) => controllers::innogrit::read_flash_id(dev),
         ControllerType::Tenafe(_) => controllers::tenafe::read_flash_id(dev),
     }
 }
@@ -573,7 +570,7 @@ fn run_nvme(dev_path: &str, args: &Args) {
             Some(ct) => ct,
             None => {
                 eprintln!(
-                    "error: unknown controller type '{}'\n\nvalid nvme types: smi, rtl, phison, maxio, marvell, innogrit, tenafe",
+                    "error: unknown controller type '{}'\n\nvalid nvme types: smi, rtl, phison, maxio, marvell, tenafe",
                     forced
                 );
                 std::process::exit(1);
@@ -588,14 +585,30 @@ fn run_nvme(dev_path: &str, args: &Args) {
         match detected {
             Some(ct) => ct,
             None => {
+                #[cfg(windows)]
+                let compatibility_note = if !crate::nvme::admin_vendor_command_format_in_spec(
+                    &id_data,
+                ) {
+                    "\nWindows compatibility: this controller reports AVSCC.CommandFormatInSpec=0, so StorNVMe cannot safely map vendor commands that transfer data."
+                } else {
+                    ""
+                };
+                #[cfg(not(windows))]
+                let compatibility_note = "";
                 eprintln!(
                     "error: could not auto-detect controller type for {}\n\
                      model: {}\n\
                      firmware: {}\n\
-                     vid: 0x{:04x}, ssvid: 0x{:04x}\n\n\
+                     vid: 0x{:04x}, ssvid: 0x{:04x}{}\n\n\
                      try: ssd-flash-id --controller <type> {}\n\
-                     valid types: smi, rtl, phison, maxio, marvell, innogrit, tenafe",
-                    dev_path, info.model, info.firmware, info.vid, info.ssvid, dev_path
+                     valid types: smi, rtl, phison, maxio, marvell, tenafe",
+                    dev_path,
+                    info.model,
+                    info.firmware,
+                    info.vid,
+                    info.ssvid,
+                    compatibility_note,
+                    dev_path
                 );
                 std::process::exit(1);
             }
@@ -633,17 +646,13 @@ fn run_nvme(dev_path: &str, args: &Args) {
             eprintln!("this may mean the controller is a different type than detected.\n");
             eprintln!("try a different controller type:");
             eprintln!("  ssd-flash-id --controller <type> {}", dev_path);
-            eprintln!("  valid types: smi, rtl, phison, maxio, marvell, innogrit, tenafe");
+            eprintln!("  valid types: smi, rtl, phison, maxio, marvell, tenafe");
             std::process::exit(1);
         }
     }
 }
 
-fn sata_auto_strategy(
-    firmware: &str,
-    has_identify_fid: bool,
-    no_probe: bool,
-) -> SataAutoStrategy {
+fn sata_auto_strategy(firmware: &str, has_identify_fid: bool, no_probe: bool) -> SataAutoStrategy {
     if controllers::smi_sata::detect_from_firmware(firmware).is_some() {
         SataAutoStrategy::Smi
     } else if controllers::rtl_sata::detect_from_firmware(firmware).is_some() {
@@ -784,27 +793,6 @@ fn try_rtl_sata(dev: &AtaDevice) -> Result<(FlashIdResult, &'static str), String
     Ok((result, "Realtek"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sata_no_probe_never_selects_vendor_family_probing() {
-        assert_eq!(
-            sata_auto_strategy("unknown", false, true),
-            SataAutoStrategy::Unsupported
-        );
-        assert_eq!(
-            sata_auto_strategy("unknown", true, true),
-            SataAutoStrategy::IdentifyData
-        );
-        assert_eq!(
-            sata_auto_strategy("unknown", false, false),
-            SataAutoStrategy::Probe
-        );
-    }
-}
-
 fn main() {
     let args = parse_args();
 
@@ -868,6 +856,27 @@ fn main() {
             );
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sata_no_probe_never_selects_vendor_family_probing() {
+        assert_eq!(
+            sata_auto_strategy("unknown", false, true),
+            SataAutoStrategy::Unsupported
+        );
+        assert_eq!(
+            sata_auto_strategy("unknown", true, true),
+            SataAutoStrategy::IdentifyData
+        );
+        assert_eq!(
+            sata_auto_strategy("unknown", false, false),
+            SataAutoStrategy::Probe
+        );
     }
 }
 
