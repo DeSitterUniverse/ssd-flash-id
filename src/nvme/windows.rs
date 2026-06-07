@@ -23,6 +23,7 @@ const STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST: u32 = 0x8000_0000;
 const STORAGE_PROTOCOL_STATUS_SUCCESS: u32 = 1;
 const STORAGE_PROTOCOL_SPECIFIC_NVME_ADMIN_COMMAND: u32 = 1;
 const NVME_COMMAND_LEN: usize = 64;
+const NVME_ERROR_INFO_LEN: usize = 64;
 const PROTOCOL_HEADER_LEN: usize = 80;
 #[cfg(test)]
 const DEFAULT_TIMEOUT_SECONDS: u32 = 10;
@@ -114,7 +115,8 @@ fn build_protocol_command(
     data_len: usize,
     timeout_seconds: u32,
 ) -> AlignedBuffer {
-    let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+    let error_info_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+    let data_offset = error_info_offset + NVME_ERROR_INFO_LEN;
     let mut packet = AlignedBuffer::zeroed(data_offset + data_len);
 
     *packet.header_mut() = StorageProtocolCommand {
@@ -123,6 +125,8 @@ fn build_protocol_command(
         protocol_type: PROTOCOL_TYPE_NVME,
         flags: STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST,
         command_length: NVME_COMMAND_LEN as u32,
+        error_info_length: NVME_ERROR_INFO_LEN as u32,
+        error_info_offset: error_info_offset as u32,
         timeout_value: timeout_seconds,
         command_specific: STORAGE_PROTOCOL_SPECIFIC_NVME_ADMIN_COMMAND,
         ..StorageProtocolCommand::default()
@@ -142,7 +146,8 @@ fn build_protocol_command(
         }
     }
 
-    let command = &mut packet.as_mut_bytes()[PROTOCOL_HEADER_LEN..data_offset];
+    let command_end = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+    let command = &mut packet.as_mut_bytes()[PROTOCOL_HEADER_LEN..command_end];
     command[0] = opcode;
     command[4..8].copy_from_slice(&nsid.to_le_bytes());
     for (index, value) in cdws.into_iter().enumerate() {
@@ -205,7 +210,7 @@ fn validate_protocol_response(
         ));
     }
 
-    let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+    let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN + NVME_ERROR_INFO_LEN;
     let expected_data_len = packet.len.saturating_sub(data_offset);
     if header.data_from_device_transfer_length != 0 {
         if header.data_from_device_transfer_length as usize != expected_data_len {
@@ -232,7 +237,7 @@ fn copy_protocol_read_data(
     output: &mut [u8],
 ) -> Result<u32, String> {
     let result = validate_protocol_response(packet, returned, opcode)?;
-    let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+    let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN + NVME_ERROR_INFO_LEN;
     output.copy_from_slice(&packet.as_bytes()[data_offset..data_offset + output.len()]);
     Ok(result)
 }
@@ -358,7 +363,7 @@ impl NvmeDevice {
             buf.len(),
             self.timeout_seconds,
         );
-        let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+        let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN + NVME_ERROR_INFO_LEN;
         packet.as_mut_bytes()[data_offset..data_offset + buf.len()].copy_from_slice(buf);
         self.submit(&mut packet, opcode).map(|(result, _)| result)
     }
@@ -519,9 +524,14 @@ mod tests {
 
         assert_eq!(packet.as_ptr() as usize % std::mem::align_of::<usize>(), 0);
         assert_eq!(header.command_length, NVME_COMMAND_LEN as u32);
+        assert_eq!(header.error_info_length, NVME_ERROR_INFO_LEN as u32);
+        assert_eq!(
+            header.error_info_offset,
+            (PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN) as u32
+        );
         assert_eq!(
             header.data_from_device_buffer_offset,
-            (PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN) as u32
+            (PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN + NVME_ERROR_INFO_LEN) as u32
         );
         assert_eq!(header.data_from_device_transfer_length, 4096);
         assert_eq!(header.data_to_device_transfer_length, 0);
@@ -583,7 +593,7 @@ mod tests {
             DEFAULT_TIMEOUT_SECONDS,
         );
         packet.header_mut().return_status = STORAGE_PROTOCOL_STATUS_SUCCESS;
-        let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
+        let data_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN + NVME_ERROR_INFO_LEN;
         packet.as_mut_bytes()[data_offset..data_offset + 4].copy_from_slice(&[1, 2, 3, 4]);
         let mut output = [0u8; 4];
 
