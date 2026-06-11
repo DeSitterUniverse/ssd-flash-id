@@ -180,9 +180,8 @@ Increase the default ten-second command timeout when required:
   `--device-type ata` after confirming the drive type.
 - `drive does not mark it supported in Command Effects Log page 0x05`: the
   Windows NVMe driver will not allow that vendor opcode.
-- `AVSCC.CommandFormatInSpec=0`: the controller uses proprietary admin-command
-  transfer fields that Microsoft StorNVMe cannot safely map through its
-  standard pass-through API.
+- `AVSCC.CommandFormatInSpec=0`: diagnostic controller metadata. It does not
+  by itself prove that StorNVMe will reject a vendor command.
 - `pass-through failed`: the drive, bridge, RAID layer, or storage driver
   rejected the low-level command.
 - `could not auto-detect controller type`: retry with `--no-probe`, or use
@@ -224,6 +223,8 @@ options:
 ### Windows
 
 - Uses `IOCTL_STORAGE_PROTOCOL_COMMAND` for NVMe vendor commands.
+- Reports the complete SDK `STORAGE_PROTOCOL_COMMAND` structure length while
+  keeping the embedded NVMe command at its documented byte offset.
 - If a physical-drive request fails with error 87, retries it through the
   drive's SCSI-port adapter handle.
 - Uses `IOCTL_ATA_PASS_THROUGH` for SATA commands.
@@ -231,28 +232,28 @@ options:
 - StorNVMe accepts a vendor-specific opcode only when the drive advertises it
   as supported in the NVMe Command Supported and Effects log. The Windows
   transport checks that log before sending each vendor opcode.
-- StorNVMe also requires a command format it can map. After a failed vendor
-  command, the CLI reports `AVSCC.CommandFormatInSpec=0` as likely context.
+- After a failed vendor command, the CLI reports
+  `AVSCC.CommandFormatInSpec=0` as diagnostic context rather than a
+  compatibility gate.
 - USB bridges, RAID drivers, and vendor storage drivers may block pass-through
   commands.
 
-#### Likely unsupported NVMe devices
+#### Windows compatibility limits
 
 Windows compatibility is firmware- and driver-dependent, not just
-controller-family-dependent. A device is likely unsupported when:
+controller-family-dependent. This Windows transport cannot use vendor commands
+when:
 
-- Identify Controller reports `AVSCC.CommandFormatInSpec=0`;
-- its required opcode has `CSUPP=0` in Command Effects Log page `0x05`;
+- Command Effects Log page `0x05` cannot be queried, or the required opcode
+  has `CSUPP=0`;
 - it is behind a USB bridge or RAID/VMD layer that blocks protocol commands;
 - its installed storage driver does not implement
   `IOCTL_STORAGE_PROTOCOL_COMMAND`.
 
-Known incompatible Windows combination: Innogrit IG5236 firmware `3.2.F.74`
-reports `AVSCC.CommandFormatInSpec=0` and Microsoft StorNVMe rejects its `0xF2`
-data transfer. Normal Innogrit support remains available because other
-firmware, drivers, and Linux may accept the command. All controller families
-must be evaluated from their actual Identify and Command Effects data; model
-or family names alone are insufficient.
+`AVSCC.CommandFormatInSpec=0` is not sufficient to classify a device as
+unsupported. All controller families must be evaluated from their actual
+pass-through result and Command Effects data; model or family names alone are
+insufficient.
 
 ### Linux
 
@@ -261,20 +262,17 @@ or family names alone are insufficient.
 
 ## Windows API References
 
-The Windows implementation follows these Microsoft sources:
+The Windows implementation directly uses or encodes the APIs and structures
+documented in these Microsoft sources:
 
 ### NVMe and storage protocols
 
-- [Working with NVMe drives](https://learn.microsoft.com/en-us/windows/win32/fileio/working-with-nvme-devices)
 - [IOCTL_STORAGE_PROTOCOL_COMMAND](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_protocol_command)
 - [STORAGE_PROTOCOL_COMMAND](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_protocol_command)
-- [NVME_ERROR_INFO_LOG](https://learn.microsoft.com/en-us/windows/win32/api/nvme/ns-nvme-nvme_error_info_log)
 - [IOCTL_STORAGE_QUERY_PROPERTY](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_query_property)
 - [STORAGE_PROPERTY_QUERY](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_property_query)
 - [STORAGE_PROTOCOL_SPECIFIC_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_protocol_specific_data)
 - [STORAGE_PROTOCOL_DATA_DESCRIPTOR](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_protocol_data_descriptor)
-- [STORAGE_PROTOCOL_NVME_DATA_TYPE](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ne-winioctl-storage_protocol_nvme_data_type)
-- [STORAGE_PROPERTY_ID](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ne-winioctl-storage_property_id)
 - [STORAGE_DEVICE_DESCRIPTOR](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_device_descriptor)
 - [STORAGE_BUS_TYPE](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ne-winioctl-storage_bus_type)
 - [NVME_IDENTIFY_CONTROLLER_DATA](https://learn.microsoft.com/en-us/windows/win32/api/nvme/ns-nvme-nvme_identify_controller_data)
@@ -292,11 +290,8 @@ The Windows implementation follows these Microsoft sources:
 - [DeviceIoControl](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-deviceiocontrol)
 - [CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
 - [QueryDosDeviceW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-querydosdevicew)
-- [GetCurrentProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocess)
-- [OpenProcessToken](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken)
 - [GetTokenInformation](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation)
 - [TOKEN_ELEVATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-token_elevation)
-- [CloseHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle)
 - [FormatMessageW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-formatmessagew)
 - [GetLastError](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror)
 

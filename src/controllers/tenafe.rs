@@ -6,6 +6,8 @@ const BANK_SIZE: usize = 8;
 const MAX_BANKS: usize = 32;
 
 pub fn read_flash_id(dev: &NvmeDevice) -> Result<FlashIdResult, String> {
+    // Tenafe expects a controller-specific configuration block on C1 before
+    // exposing the NAND table through C2 in namespace 1.
     let mut c1_buf = [0u8; 4096];
     c1_buf[0x00] = 0x03;
     c1_buf[0x02] = 0x0C;

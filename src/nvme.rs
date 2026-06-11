@@ -9,6 +9,8 @@ pub use imp::NvmeDevice;
 
 #[cfg(windows)]
 pub fn admin_vendor_command_format_in_spec(data: &[u8; 4096]) -> bool {
+    // AVSCC is byte 264 in NVME_IDENTIFY_CONTROLLER_DATA; bit 0 is
+    // CommandFormatInSpec. It is diagnostic metadata, not a pass-through gate.
     data[264] & 1 != 0
 }
 

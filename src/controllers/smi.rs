@@ -13,6 +13,8 @@ const CTRL_NAME_OFFSET: usize = 0x1F0;
 
 pub fn read_flash_id(dev: &NvmeDevice) -> Result<FlashIdResult, String> {
     let mut buf = [0u8; 2048];
+    // SMI returns a packed diagnostic page: NAND IDs occupy 0x30..0x1EF and
+    // the controller name starts at 0x1F0.
     dev.admin_read(0xC2, 0, 0x200, 0, 0x40, 0x01, 0, 0, &mut buf)
         .map_err(|e| format!("SMI flash ID command failed: {}", e))?;
 

@@ -5,6 +5,8 @@ const MAX_CHANNELS: u8 = 8;
 const MAX_CES: u8 = 8;
 
 fn send_c1(dev: &NvmeDevice, subcmd: u8, channel: u8, ce: u8) -> Result<(), String> {
+    // C1 selects a diagnostic operation and, for per-bank reads, the NAND
+    // channel and chip-enable. C2 retrieves the selected response.
     let mut buf = [0u8; 512];
     buf[0] = 0xFF;
     buf[1] = 0xE5;

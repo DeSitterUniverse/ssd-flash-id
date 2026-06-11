@@ -6,6 +6,8 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 
 pub fn format_windows_error(code: u32) -> String {
     let mut buffer = [0u16; 2048];
+    // Request the system message table and suppress insert placeholders because
+    // storage errors are reported without the original FormatMessage arguments.
     let length = unsafe {
         FormatMessageW(
             FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,

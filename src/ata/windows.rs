@@ -24,6 +24,8 @@ const ATA_STATUS_DEVICE_FAULT: u8 = 1 << 5;
 #[cfg(test)]
 const DEFAULT_TIMEOUT_SECONDS: u32 = 10;
 
+// Mirrors the 64-bit ATA_PASS_THROUGH_EX layout. data_buffer_offset is
+// ULONG_PTR in the Windows SDK, hence usize here.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct AtaPassThroughEx {
@@ -48,6 +50,8 @@ enum AtaDirection {
     Write,
 }
 
+// Keep the C header and its trailing transfer buffer in one aligned allocation,
+// as required by IOCTL_ATA_PASS_THROUGH's buffered I/O contract.
 struct AlignedBuffer {
     words: Vec<usize>,
     len: usize,
@@ -118,6 +122,8 @@ fn build_ata_packet(
 
     let mut previous_task_file = [0u8; 8];
     if let Some(previous) = previous {
+        // 48-bit ATA commands place the high-order task-file bytes in the
+        // PreviousTaskFile array and the low-order bytes in CurrentTaskFile.
         previous_task_file[..5].copy_from_slice(&previous);
     }
 
@@ -164,6 +170,8 @@ fn validate_ata_response(
         ));
     }
 
+    // On completion Windows replaces CurrentTaskFile with the ATA output
+    // registers; byte 6 is Status and byte 0 is Error.
     let task_file = header.current_task_file;
     if task_file[6] & (ATA_STATUS_ERROR | ATA_STATUS_DEVICE_FAULT) != 0 {
         return Err(format!(
@@ -427,6 +435,8 @@ impl AtaDevice {
     fn submit(&self, packet: &mut AlignedBuffer, command: u8) -> Result<u32, String> {
         let expected_data_len = packet.len - size_of::<AtaPassThroughEx>();
         let mut returned = 0u32;
+        // IOCTL_ATA_PASS_THROUGH is synchronous and uses the same system buffer
+        // for the task file and any small data transfer.
         let ok = unsafe {
             DeviceIoControl(
                 self.handle,

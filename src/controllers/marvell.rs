@@ -5,6 +5,8 @@ const DM1160_SIG: &[u8; 6] = b"DM1160";
 const DM1140_SIG: &[u8; 6] = b"DM1140";
 
 pub fn read_flash_id(dev: &NvmeDevice) -> Result<FlashIdResult, String> {
+    // The Marvell flow is a three-step handshake: identify with 0xFE, request
+    // the NAND table with 0xFD, then fetch it with another 0xFE read.
     let mut fw_buf = [0u8; 512];
     dev.admin_read(0xFE, 0, 0x80, 0, 0, 0, 0, 0xA1, &mut fw_buf)
         .map_err(|e| format!("Marvell firmware info read failed: {}", e))?;

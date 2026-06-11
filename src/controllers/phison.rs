@@ -5,6 +5,8 @@ const PHISON_SIGNATURE: &[u8; 8] = b"PhIsOnNo";
 const MAX_BANKS: u32 = 8;
 
 fn phison_crc(buf: &[u8; 64]) -> u32 {
+    // Phison authenticates the vendor command with CRC-16/CCITT over the first
+    // 60 command bytes, byte-swapped into the high half of CDW15.
     let mut crc: u16 = 0;
     for &b in &buf[..60] {
         crc ^= (b as u16) << 8;
@@ -52,6 +54,8 @@ pub fn read_flash_id(dev: &NvmeDevice) -> Result<FlashIdResult, String> {
     }
 
     if banks.is_empty() {
+        // Older layouts require one 0x90-style NAND ID query per bank when the
+        // system-information page does not expose IDs directly.
         for bank in 0..MAX_BANKS {
             let cdw12 = (bank << 8) | 0x90;
             let cdw15_bank = build_cmd(0xD2, 0x80, cdw12, 0);
