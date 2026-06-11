@@ -26,7 +26,6 @@ const STORAGE_PROTOCOL_STATUS_SUCCESS: u32 = 1;
 const STORAGE_PROTOCOL_SPECIFIC_NVME_ADMIN_COMMAND: u32 = 1;
 const NVME_COMMAND_LEN: usize = 64;
 const NVME_ERROR_INFO_LEN: usize = 64;
-const PROTOCOL_HEADER_LEN: usize = 80;
 #[cfg(test)]
 const DEFAULT_TIMEOUT_SECONDS: u32 = 10;
 const STORAGE_ADAPTER_PROTOCOL_SPECIFIC_PROPERTY: u32 = 49;
@@ -38,6 +37,8 @@ const PROTOCOL_SPECIFIC_DATA_LEN: usize = 40;
 const PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN: usize = 8;
 const IDENTIFY_DATA_LEN: usize = 4096;
 
+// Mirrors STORAGE_PROTOCOL_COMMAND exactly, including its trailing
+// Command[ANYSIZE_ARRAY] member.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct StorageProtocolCommand {
@@ -60,7 +61,11 @@ struct StorageProtocolCommand {
     fixed_protocol_return_data: u32,
     fixed_protocol_return_data2: u32,
     reserved1: [u32; 2],
+    // The SDK's trailing ANYSIZE_ARRAY makes sizeof 84 while the payload starts at byte 80.
+    command: [u8; 1],
 }
+
+const PROTOCOL_HEADER_LEN: usize = std::mem::offset_of!(StorageProtocolCommand, command);
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -79,6 +84,8 @@ enum DataDirection {
     Write,
 }
 
+// Windows requires every embedded buffer offset to be pointer-aligned. Backing
+// the allocation with usize words preserves that alignment while exposing bytes.
 struct AlignedBuffer {
     words: Vec<usize>,
     len: usize,
@@ -127,6 +134,8 @@ fn build_protocol_command(
     data_len: usize,
     timeout_seconds: u32,
 ) -> AlignedBuffer {
+    // Required layout:
+    // header | 64-byte NVMe command | error info | optional transfer buffer.
     let error_info_offset = PROTOCOL_HEADER_LEN + NVME_COMMAND_LEN;
     let data_offset = error_info_offset + NVME_ERROR_INFO_LEN;
     let mut packet = AlignedBuffer::zeroed(data_offset + data_len);
@@ -135,6 +144,8 @@ fn build_protocol_command(
         version: STORAGE_PROTOCOL_STRUCTURE_VERSION,
         length: size_of::<StorageProtocolCommand>() as u32,
         protocol_type: PROTOCOL_TYPE_NVME,
+        // Vendor admin commands are adapter requests even when submitted
+        // through a PhysicalDrive handle.
         flags: STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST,
         command_length: NVME_COMMAND_LEN as u32,
         error_info_length: NVME_ERROR_INFO_LEN as u32,
@@ -176,6 +187,8 @@ fn build_protocol_query(
     request_value: u32,
     data_len: usize,
 ) -> AlignedBuffer {
+    // Encode STORAGE_PROPERTY_QUERY followed by
+    // STORAGE_PROTOCOL_SPECIFIC_DATA and its returned payload.
     let data_offset = PROTOCOL_DATA_DESCRIPTOR_PREFIX_LEN + PROTOCOL_SPECIFIC_DATA_LEN;
     let mut packet = AlignedBuffer::zeroed(data_offset + data_len);
     let bytes = packet.as_mut_bytes();
@@ -209,6 +222,7 @@ fn build_command_effects_query() -> AlignedBuffer {
 }
 
 fn admin_command_supported(log: &[u8; COMMAND_EFFECTS_LOG_LEN], opcode: u8) -> bool {
+    // The low bit of each admin-command effect entry is CSUPP.
     let offset = opcode as usize * size_of::<u32>();
     u32::from_le_bytes(log[offset..offset + 4].try_into().unwrap()) & 1 != 0
 }
@@ -300,9 +314,13 @@ fn extract_protocol_data<const N: usize>(
 }
 
 pub struct NvmeDevice {
+    // The physical-drive handle is used for identify/property queries and the
+    // first pass-through attempt.
     handle: HANDLE,
+    // Some storage stacks accept protocol commands only on the SCSI port.
     adapter_handle: Option<HANDLE>,
     timeout_seconds: u32,
+    // The command-effects log is immutable for the lifetime of an open device.
     command_effects: RefCell<Option<[u8; COMMAND_EFFECTS_LOG_LEN]>>,
 }
 
@@ -374,6 +392,8 @@ fn scsi_port_path(port_number: u8) -> String {
 impl NvmeDevice {
     pub fn open_with_timeout(path: &str, timeout_seconds: u32) -> Result<Self, String> {
         let handle = open_handle(path)?;
+        // Adapter discovery is best-effort. Direct physical-drive pass-through
+        // remains usable when IOCTL_SCSI_GET_ADDRESS is unavailable.
         let adapter_handle = query_scsi_port(handle)
             .ok()
             .and_then(|port_number| open_handle(&scsi_port_path(port_number)).ok());
@@ -466,6 +486,8 @@ impl NvmeDevice {
     }
 
     fn ensure_admin_command_supported(&self, opcode: u8) -> Result<(), String> {
+        // StorNVMe rejects vendor opcodes that do not advertise CSUPP. Keep
+        // this preflight conservative instead of probing rejected commands.
         if self.command_effects.borrow().is_none() {
             let mut packet = build_command_effects_query();
             let returned = self.submit_query(&mut packet, "NVMe command-effects query")?;
@@ -513,6 +535,8 @@ impl NvmeDevice {
     }
 
     fn submit(&self, packet: &mut AlignedBuffer, opcode: u8) -> Result<(u32, u32), String> {
+        // DeviceIoControl uses the packet for both input and output, so preserve
+        // the request before a possible adapter retry.
         let original_packet = packet.as_bytes().to_vec();
         let mut returned = 0u32;
         let ok = unsafe {
@@ -754,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_header_length_matches_windows_sdk_structure() {
+    fn protocol_structure_length_includes_trailing_command_member() {
         let packet = build_protocol_command(
             DataDirection::None,
             0xC1,
@@ -764,9 +788,8 @@ mod tests {
             DEFAULT_TIMEOUT_SECONDS,
         );
 
-        assert_eq!(
-            packet.header().length as usize,
-            size_of::<StorageProtocolCommand>()
-        );
+        assert_eq!(packet.header().length, 84);
+        assert_eq!(size_of::<StorageProtocolCommand>(), 84);
+        assert_eq!(PROTOCOL_HEADER_LEN, 80);
     }
 }

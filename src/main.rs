@@ -324,6 +324,7 @@ fn device_kind(path: &str) -> DeviceKind {
 
 #[cfg(windows)]
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
+// STORAGE_BUS_TYPE values used by STORAGE_DEVICE_DESCRIPTOR.BusType.
 #[cfg(windows)]
 const BUS_TYPE_ATA: u32 = 3;
 #[cfg(windows)]
@@ -340,6 +341,7 @@ fn device_kind_from_bus(bus_type: Option<u32>) -> DeviceKind {
     match bus_type {
         Some(BUS_TYPE_NVME) => DeviceKind::Nvme,
         Some(BUS_TYPE_ATA) | Some(BUS_TYPE_SATA) => DeviceKind::Ata,
+        // USB and RAID descriptors hide the protocol behind the bridge or driver.
         Some(BUS_TYPE_USB) | Some(BUS_TYPE_RAID) => DeviceKind::Ambiguous,
         _ => DeviceKind::Unknown,
     }
@@ -352,6 +354,8 @@ fn is_process_elevated() -> bool {
         return false;
     }
 
+    // Physical-drive access needs an elevated token, not merely membership in
+    // the Administrators group when UAC is enabled.
     let mut elevation = TOKEN_ELEVATION::default();
     let mut returned = 0u32;
     let ok = unsafe {
@@ -377,6 +381,8 @@ fn enumerate_physical_drives() -> Vec<String> {
         return Vec::new();
     }
 
+    // QueryDosDeviceW returns a MULTI_SZ: NUL-terminated strings followed by
+    // one additional NUL terminator.
     let names = buffer[..length as usize]
         .split(|value| *value == 0)
         .take_while(|name| !name.is_empty())
@@ -421,6 +427,8 @@ fn storage_bus_type(path: &str) -> Option<u32> {
         return None;
     }
 
+    // A zeroed STORAGE_PROPERTY_QUERY selects StorageDeviceProperty and
+    // PropertyStandardQuery. BusType is at byte 28 of STORAGE_DEVICE_DESCRIPTOR.
     let query = [0u8; 12];
     let mut descriptor = [0u8; 64];
     let mut returned = 0u32;
@@ -543,6 +551,13 @@ fn print_banks(result: &FlashIdResult, raw: bool) {
     }
 }
 
+#[cfg(windows)]
+fn windows_avscc_note(id_data: &[u8; 4096]) -> Option<&'static str> {
+    (!crate::nvme::admin_vendor_command_format_in_spec(id_data)).then_some(
+        "\nWindows diagnostic: AVSCC.CommandFormatInSpec=0; this does not by itself determine whether vendor pass-through is supported.",
+    )
+}
+
 fn run_nvme(dev_path: &str, args: &Args) {
     if let Some(forced) = args.controller.as_deref() {
         eprintln!(
@@ -589,13 +604,7 @@ fn run_nvme(dev_path: &str, args: &Args) {
             Some(ct) => ct,
             None => {
                 #[cfg(windows)]
-                let compatibility_note = if !crate::nvme::admin_vendor_command_format_in_spec(
-                    &id_data,
-                ) {
-                    "\nWindows compatibility: this controller reports AVSCC.CommandFormatInSpec=0, so StorNVMe cannot safely map vendor commands that transfer data."
-                } else {
-                    ""
-                };
+                let compatibility_note = windows_avscc_note(&id_data).unwrap_or("");
                 #[cfg(not(windows))]
                 let compatibility_note = "";
                 eprintln!(
@@ -642,11 +651,8 @@ fn run_nvme(dev_path: &str, args: &Args) {
         Err(e) => {
             eprintln!("error: {} flash ID read failed: {}\n", ct.name(), e);
             #[cfg(windows)]
-            if !crate::nvme::admin_vendor_command_format_in_spec(&id_data) {
-                eprintln!(
-                    "Windows compatibility: this controller reports AVSCC.CommandFormatInSpec=0. \
-                     StorNVMe may reject its proprietary data-transfer layout even when the same command works on Linux.\n"
-                );
+            if let Some(note) = windows_avscc_note(&id_data) {
+                eprintln!("{}\n", note.trim_start());
             }
             eprintln!(
                 "the {} vendor command (--controller {}) was rejected by this device.",
@@ -887,6 +893,19 @@ mod tests {
             sata_auto_strategy("unknown", false, false),
             SataAutoStrategy::Probe
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn avscc_note_is_diagnostic_not_a_compatibility_rejection() {
+        let mut identify = [0u8; 4096];
+
+        let note = windows_avscc_note(&identify).unwrap();
+        assert!(note.contains("diagnostic"));
+        assert!(note.contains("does not by itself"));
+
+        identify[264] = 1;
+        assert_eq!(windows_avscc_note(&identify), None);
     }
 }
 
