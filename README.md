@@ -32,12 +32,11 @@ Requirements:
 - Rust stable with the MSVC toolchain
 - An Administrator PowerShell or Command Prompt for accessing physical drives
 
-Build the `windows-port` branch:
+Build:
 
 ```
 git clone https://github.com/DeSitterUniverse/ssd-flash-id.git
 cd ssd-flash-id
-git switch windows-port
 cargo build --release
 ```
 
