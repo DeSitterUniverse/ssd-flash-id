@@ -3,12 +3,12 @@
 Windows port of
 [pseudolabel/ssd-flash-id](https://github.com/pseudolabel/ssd-flash-id), the
 Linux open-source equivalent of
-[VLO's SSD Flash ID tools](http://vlo.name:3000/ssdtool/). It identifies NAND
-flash chips on NVMe and SATA SSDs via vendor-specific commands, reporting flash
-type (QLC/TLC/MLC/SLC), manufacturer, and technology node for each NAND bank.
+[VLO's SSD Flash ID tools](http://vlo.name:3000/ssdtool/). Identifies NAND flash
+chips on NVMe and SATA SSDs via vendor-specific commands, reporting flash type
+(QLC/TLC/MLC/SLC), manufacturer, and technology node for each NAND bank.
 
-The Windows port retains the original Linux implementation and controller
-support.
+The fork keeps the original Linux implementation and controller/NAND decoding
+code, with a native Windows storage transport added underneath it.
 
 ```
 $ sudo ssd-flash-id /dev/nvme0
@@ -30,9 +30,7 @@ Requirements:
 
 - Windows 10 or later
 - Rust stable with the MSVC toolchain
-- An Administrator PowerShell or Command Prompt for accessing physical drives
-
-Build:
+- Administrator terminal for raw physical-drive access
 
 ```
 git clone https://github.com/DeSitterUniverse/ssd-flash-id.git
@@ -40,9 +38,9 @@ cd ssd-flash-id
 cargo build --release
 ```
 
-Run from an elevated terminal:
+Run:
 
-```
+```powershell
 .\target\release\ssd-flash-id.exe --list
 .\target\release\ssd-flash-id.exe \\.\PhysicalDrive0
 ```
@@ -55,7 +53,7 @@ Install the upstream crate:
 cargo install ssd-flash-id
 ```
 
-Or build this branch from source:
+Or build this fork:
 
 ```
 cargo build --release
@@ -94,111 +92,6 @@ YMTC, SanDisk, and others. Reports technology node (e.g. 176L, 232L, BiCS5,
 
 ## Usage
 
-### Windows
-
-#### 1. Build
-
-Install [Rust](https://www.rust-lang.org/tools/install) with the stable MSVC
-toolchain, then run:
-
-```powershell
-git clone https://github.com/DeSitterUniverse/ssd-flash-id.git
-cd ssd-flash-id
-git switch windows-port
-cargo build --release
-```
-
-The executable is created at:
-
-```text
-target\release\ssd-flash-id.exe
-```
-
-#### 2. Open an Administrator terminal
-
-Raw physical drives require Administrator privileges:
-
-1. Open the Start menu.
-2. Search for **PowerShell** or **Windows Terminal**.
-3. Select **Run as administrator**.
-4. Change to the cloned repository directory.
-
-#### 3. List detected drives
-
-```powershell
-.\target\release\ssd-flash-id.exe --list
-```
-
-The command prints paths such as `\\.\PhysicalDrive0`. Confirm the model and
-serial number before running vendor commands against a drive.
-
-#### 4. Inspect a drive
-
-```powershell
-.\target\release\ssd-flash-id.exe \\.\PhysicalDrive0
-```
-
-Start with metadata-only controller detection if the drive or controller is
-unknown:
-
-```powershell
-.\target\release\ssd-flash-id.exe --no-probe \\.\PhysicalDrive0
-```
-
-`--no-probe` prevents controller-family probing, but reading the flash ID still
-requires the vendor command for the controller selected from metadata.
-
-If a USB bridge or RAID driver makes the protocol ambiguous, specify it
-explicitly:
-
-```powershell
-.\target\release\ssd-flash-id.exe --device-type nvme \\.\PhysicalDrive2
-.\target\release\ssd-flash-id.exe --device-type ata \\.\PhysicalDrive2
-```
-
-Some USB bridges, RAID drivers, and vendor storage drivers block pass-through
-commands entirely. `--device-type` cannot bypass that driver limitation.
-
-Force a controller only when its family is already known:
-
-```powershell
-.\target\release\ssd-flash-id.exe --controller phison \\.\PhysicalDrive0
-.\target\release\ssd-flash-id.exe --controller smi-sata \\.\PhysicalDrive1
-```
-
-Increase the default ten-second command timeout when required:
-
-```powershell
-.\target\release\ssd-flash-id.exe --timeout-seconds 30 \\.\PhysicalDrive0
-```
-
-#### 5. Interpret common errors
-
-- `administrator privileges required`: reopen the terminal as Administrator.
-- `could not determine the storage protocol`: add `--device-type nvme` or
-  `--device-type ata` after confirming the drive type.
-- `drive does not mark it supported in Command Effects Log page 0x05`: the
-  Windows NVMe driver will not allow that vendor opcode.
-- `AVSCC.CommandFormatInSpec=0`: diagnostic controller metadata. It does not
-  by itself prove that StorNVMe will reject a vendor command.
-- `pass-through failed`: the drive, bridge, RAID layer, or storage driver
-  rejected the low-level command.
-- `could not auto-detect controller type`: retry with `--no-probe`, or use
-  `--controller` only if the controller family is known.
-
-Do not experiment with forced controller families on a drive containing
-important data. Vendor-specific commands operate below the file-system layer.
-
-### Linux
-
-```bash
-sudo ssd-flash-id --list
-sudo ssd-flash-id /dev/nvme0
-sudo ssd-flash-id /dev/sda
-```
-
-### Options
-
 ```
 ssd-flash-id [options] [device]
 
@@ -214,85 +107,139 @@ options:
     --timeout-seconds   command timeout in seconds (default: 10)
 ```
 
-`--no-probe` prevents controller-family probing on both NVMe and SATA. A forced
-`--controller` selection prints a warning because it bypasses auto-detection.
+### Windows notes
 
-## Platform Notes
+Use `--list` first to confirm the target `\\.\PhysicalDriveN` path and model.
+Raw device access requires an elevated process.
+
+For an unknown controller, `--no-probe` avoids controller-family probe commands
+where possible. A flash-ID read still requires the vendor command for the
+selected controller.
+
+USB bridges and RAID/VMD stacks can hide the underlying protocol. Use
+`--device-type nvme` or `--device-type ata` only after confirming the drive
+type. These flags select the transport; they do not bypass drivers or bridges
+that block pass-through commands.
+
+A forced `--controller` bypasses auto-detection and should only be used when the
+controller family is known.
+
+## Windows port
+
+The port keeps controller detection, vendor-command definitions, response
+parsing, NAND-bank extraction, and NAND ID decoding shared with Linux. Platform
+specific code is limited to device enumeration and raw command transport.
+
+```
+controller / NAND logic
+        |
+        +-- NvmeDevice
+        |     +-- Linux: NVME_IOCTL_ADMIN_CMD
+        |     `-- Windows: IOCTL_STORAGE_PROTOCOL_COMMAND
+        |
+        `-- AtaDevice
+              +-- Linux: SG_IO + ATA PASS-THROUGH(16)
+              `-- Windows: IOCTL_ATA_PASS_THROUGH
+```
+
+The split is implemented in:
+
+```
+src/nvme.rs
+  src/nvme/linux.rs
+  src/nvme/windows.rs
+
+src/ata.rs
+  src/ata/linux.rs
+  src/ata/windows.rs
+```
+
+### NVMe transport
+
+Linux sends admin commands directly with `NVME_IOCTL_ADMIN_CMD`.
+
+Windows opens `\\.\PhysicalDriveN` with `CreateFileW` and uses:
+
+- `IOCTL_STORAGE_QUERY_PROPERTY` for standard protocol data such as Identify
+  Controller;
+- `IOCTL_STORAGE_PROTOCOL_COMMAND` for vendor-specific NVMe admin commands;
+- `IOCTL_SCSI_GET_ADDRESS` to resolve a storage-adapter handle when required.
+
+The Windows transport serializes the existing opcode, NSID, and CDW10-CDW15
+arguments into a 64-byte NVMe command and packs it with the protocol header,
+error-information buffer, and optional transfer buffer in one aligned request.
+Returned protocol status, NVMe status, transfer lengths, and response extents
+are validated before data is exposed to controller code.
+
+`STORAGE_PROTOCOL_COMMAND` has a trailing `Command[ANYSIZE_ARRAY]` in the
+Windows SDK. The request therefore reports the complete SDK structure length
+while the embedded NVMe command starts at the structure's command offset. These
+are not the same byte value and are handled separately.
+
+Some storage stacks reject `IOCTL_STORAGE_PROTOCOL_COMMAND` on the physical
+-drive handle with `ERROR_INVALID_PARAMETER`. In that case the request is
+restored and retried through the matching `\\.\ScsiN:` adapter handle.
+
+### StorNVMe vendor opcodes
+
+Microsoft StorNVMe can reject vendor-specific admin opcodes that are not marked
+supported by the drive.
+
+Before a vendor command is submitted, the Windows transport queries NVMe
+Command Supported and Effects Log page `0x05` and checks the opcode's `CSUPP`
+bit. The log is cached for the lifetime of the device handle.
+
+This means a controller/vendor command that works through the Linux ioctl path
+may still fail on Windows depending on firmware and the active storage stack.
+Controller-family support alone is not sufficient to guarantee Windows
+pass-through support.
+
+`AVSCC.CommandFormatInSpec` is reported as diagnostic information only. It is
+not used as a compatibility gate.
+
+### ATA transport
+
+Linux issues ATA PASS-THROUGH(16) CDBs through `SG_IO`.
+
+Windows uses `IOCTL_ATA_PASS_THROUGH` with `ATA_PASS_THROUGH_EX`. The existing
+ATA command abstraction is mapped to Windows task-file registers and flags,
+including data direction, DMA, and 48-bit command handling. For 48-bit
+commands, high-order register bytes are placed in `PreviousTaskFile` and
+low-order bytes in `CurrentTaskFile`.
+
+The pass-through header and data buffer share one aligned allocation. Returned
+buffer lengths, transfer counts, ATA status, error, and device-fault state are
+checked before returning data.
+
+### Device discovery and safety
+
+Windows-specific support also includes:
+
+- `QueryDosDeviceW` enumeration of `PhysicalDriveN` devices;
+- `STORAGE_DEVICE_DESCRIPTOR` bus-type detection;
+- explicit handling for ambiguous USB/RAID devices;
+- UAC elevation checks with `OpenProcessToken` / `TokenElevation`;
+- configurable command timeouts;
+- Windows error text through `FormatMessageW`;
+- `--no-probe` and forced-controller warnings;
+- validation tests for Windows protocol-packet layout and simulated responses.
+
+Windows compatibility remains firmware-, driver-, and topology-dependent.
+USB bridges, RAID/VMD layers, and vendor storage drivers may reject low-level
+commands even when the SSD controller itself is supported.
+
+## Requirements
 
 ### Windows
 
-- Uses `IOCTL_STORAGE_PROTOCOL_COMMAND` for NVMe vendor commands.
-- Reports the complete SDK `STORAGE_PROTOCOL_COMMAND` structure length while
-  keeping the embedded NVMe command at its documented byte offset.
-- If a physical-drive request fails with error 87, retries it through the
-  drive's SCSI-port adapter handle.
-- Uses `IOCTL_ATA_PASS_THROUGH` for SATA commands.
-- Requires Administrator privileges.
-- StorNVMe accepts a vendor-specific opcode only when the drive advertises it
-  as supported in the NVMe Command Supported and Effects log. The Windows
-  transport checks that log before sending each vendor opcode.
-- After a failed vendor command, the CLI reports
-  `AVSCC.CommandFormatInSpec=0` as diagnostic context rather than a
-  compatibility gate.
-- USB bridges, RAID drivers, and vendor storage drivers may block pass-through
-  commands.
-
-#### Windows compatibility limits
-
-Windows compatibility is firmware- and driver-dependent, not just
-controller-family-dependent. This Windows transport cannot use vendor commands
-when:
-
-- Command Effects Log page `0x05` cannot be queried, or the required opcode
-  has `CSUPP=0`;
-- it is behind a USB bridge or RAID/VMD layer that blocks protocol commands;
-- its installed storage driver does not implement
-  `IOCTL_STORAGE_PROTOCOL_COMMAND`.
-
-`AVSCC.CommandFormatInSpec=0` is not sufficient to classify a device as
-unsupported. All controller families must be evaluated from their actual
-pass-through result and Command Effects data; model or family names alone are
-insufficient.
+- Windows 10 or later
+- Administrator privileges
+- storage stack that permits the required NVMe/ATA pass-through commands
 
 ### Linux
 
-- Uses NVMe ioctl and ATA PASS-THROUGH via `SG_IO`.
-- Requires root privileges (`sudo`).
-
-## Windows API References
-
-The Windows implementation directly uses or encodes the APIs and structures
-documented in these Microsoft sources:
-
-### NVMe and storage protocols
-
-- [IOCTL_STORAGE_PROTOCOL_COMMAND](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_protocol_command)
-- [STORAGE_PROTOCOL_COMMAND](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_protocol_command)
-- [IOCTL_STORAGE_QUERY_PROPERTY](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_storage_query_property)
-- [STORAGE_PROPERTY_QUERY](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_property_query)
-- [STORAGE_PROTOCOL_SPECIFIC_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_protocol_specific_data)
-- [STORAGE_PROTOCOL_DATA_DESCRIPTOR](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_protocol_data_descriptor)
-- [STORAGE_DEVICE_DESCRIPTOR](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-storage_device_descriptor)
-- [STORAGE_BUS_TYPE](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ne-winioctl-storage_bus_type)
-- [NVME_IDENTIFY_CONTROLLER_DATA](https://learn.microsoft.com/en-us/windows/win32/api/nvme/ns-nvme-nvme_identify_controller_data)
-- [StorNVMe command set support](https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/stornvme-command-set-support)
-- [IOCTL_SCSI_GET_ADDRESS](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ni-ntddscsi-ioctl_scsi_get_address)
-- [SCSI_ADDRESS](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ns-ntddscsi-_scsi_address)
-
-### ATA pass-through
-
-- [IOCTL_ATA_PASS_THROUGH](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ni-ntddscsi-ioctl_ata_pass_through)
-- [ATA_PASS_THROUGH_EX](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ns-ntddscsi-_ata_pass_through_ex)
-
-### Device access, enumeration, and errors
-
-- [DeviceIoControl](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-deviceiocontrol)
-- [CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
-- [QueryDosDeviceW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-querydosdevicew)
-- [GetTokenInformation](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation)
-- [TOKEN_ELEVATION](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-token_elevation)
-- [FormatMessageW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-formatmessagew)
-- [GetLastError](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror)
+- Linux with NVMe ioctl and `SG_IO` support
+- root privileges (`sudo`)
 
 ## Credits
 
