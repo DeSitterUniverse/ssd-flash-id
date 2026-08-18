@@ -176,9 +176,9 @@ Windows SDK. The request therefore reports the complete SDK structure length
 while the embedded NVMe command starts at the structure's command offset. These
 are not the same byte value and are handled separately.
 
-Some storage stacks reject `IOCTL_STORAGE_PROTOCOL_COMMAND` on the physical
--drive handle with `ERROR_INVALID_PARAMETER`. In that case the request is
-restored and retried through the matching `\\.\ScsiN:` adapter handle.
+Some storage stacks reject `IOCTL_STORAGE_PROTOCOL_COMMAND` on the
+physical-drive handle with `ERROR_INVALID_PARAMETER`. In that case the request
+is restored and retried through the matching `\\.\ScsiN:` adapter handle.
 
 ### StorNVMe vendor opcodes
 
